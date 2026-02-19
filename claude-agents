@@ -251,7 +251,7 @@ def draw(stdscr, frame: int):
             if waiting:
                 # Show how long it's been waiting for input, not total session time
                 wait_dur = fmt_dur(s["lastWaitUserAt"])
-                safe_add(stdscr, row, 1, "\u25e6", w, YELLOW)
+                safe_add(stdscr, row, 1, "○", w, YELLOW)
                 safe_add(stdscr, row, 3, f"~{wait_dur:>5}", w, DIM)
                 safe_add(stdscr, row, 10, sid_short, w, DIM)
                 safe_add(stdscr, row, 17, prompt, w, DIM)
@@ -266,7 +266,7 @@ def draw(stdscr, frame: int):
                         dur_attr = YELLOW
                 except Exception:
                     pass
-                safe_add(stdscr, row, 1, sc, w, GREEN)
+                safe_add(stdscr, row, 1, "●", w, GREEN)
                 safe_add(stdscr, row, 3, f"{run_dur:>6}", w, dur_attr)
                 safe_add(stdscr, row, 10, sid_short, w, DIM)
                 safe_add(stdscr, row, 17, prompt, w, WHITE)
