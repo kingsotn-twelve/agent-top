@@ -10,8 +10,7 @@ import os
 import sqlite3
 from datetime import datetime
 
-# Resolve symlinks so DB_PATH always points to ~/.claude/ccnotify/ccnotify.db
-DB_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ccnotify.db")
+DB_PATH = os.path.expanduser("~/.claude/ccnotify/ccnotify.db")
 
 MAX_COMPLETED_AGENTS = 10
 MAX_HISTORY = 20
