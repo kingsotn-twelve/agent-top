@@ -51,7 +51,7 @@ def query_db(db_path: str) -> dict:
         for row in conn.execute(
             """SELECT agent_id, agent_type, session_id, cwd, started_at
                FROM agent
-               WHERE stopped_at IS NULL AND agent_type != ''
+               WHERE stopped_at IS NULL
                ORDER BY started_at ASC"""
         ):
             data["running_agents"].append(dict(row))
@@ -60,7 +60,7 @@ def query_db(db_path: str) -> dict:
         for row in conn.execute(
             f"""SELECT agent_id, agent_type, session_id, cwd, started_at, stopped_at
                 FROM agent
-                WHERE stopped_at IS NOT NULL AND agent_type != ''
+                WHERE stopped_at IS NOT NULL
                 ORDER BY stopped_at DESC
                 LIMIT {MAX_COMPLETED_AGENTS}"""
         ):
@@ -245,7 +245,7 @@ def draw(stdscr, frame: int):
             if row >= h - 2:
                 break
             dur = fmt_dur(a["started_at"])
-            atype = a["agent_type"]
+            atype = a["agent_type"] or "agent"
             safe_add(stdscr, row, 1, sc, w, MAGENTA)
             safe_add(stdscr, row, 3, f"{dur:>6}", w, YELLOW)
             safe_add(stdscr, row, 10, atype, w, MAGENTA)
@@ -284,7 +284,7 @@ def draw(stdscr, frame: int):
 
             if kind == "agent":
                 dur = fmt_dur(item["started_at"], item["stopped_at"])
-                atype = item.get("agent_type", "?")
+                atype = item.get("agent_type") or "agent"
                 safe_add(stdscr, row, 1, t, w, DIM)
                 safe_add(stdscr, row, 10, f"{dur:>6}", w, DIM)
                 safe_add(stdscr, row, 17, f"▸ {atype}", w, curses.color_pair(6))

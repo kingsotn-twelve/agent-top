@@ -212,7 +212,7 @@ class ClaudePromptTracker:
 
     def handle_subagent_start(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
-        agent_type = data.get("agent_type", "unknown")
+        agent_type = data.get("agent_type", "") or data.get("subagent_type", "") or "unknown"
         session_id = data.get("session_id", "")
         cwd = data.get("cwd", "")
         with sqlite3.connect(self.db_path) as conn:
@@ -226,7 +226,7 @@ class ClaudePromptTracker:
 
     def handle_subagent_stop(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
-        agent_type = data.get("agent_type", "unknown")
+        agent_type = data.get("agent_type", "") or data.get("subagent_type", "") or "unknown"
         session_id = data.get("session_id", "")
         transcript_path = data.get("agent_transcript_path", "")
         with sqlite3.connect(self.db_path) as conn:
