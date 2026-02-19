@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Claude Code Notify — desktop notifications for Claude Code hooks.
-Consolidated handler for Stop, SubagentStart, SubagentStop, Notification, and UserPromptSubmit.
+Consolidated handler for Stop, SubagentStart, SubagentStop, Notification,
+PreToolUse, and UserPromptSubmit.
 """
 
 import json
@@ -208,7 +209,74 @@ class ClaudePromptTracker:
                     transcript_path TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tool_event (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    tool_label TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tool_event_session
+                    ON tool_event (session_id, created_at DESC)
+            """)
+            # Prune tool events older than 24h
+            conn.execute("""
+                DELETE FROM tool_event
+                WHERE created_at < datetime('now', '-24 hours')
+            """)
             conn.commit()
+
+    @staticmethod
+    def _extract_tool_label(tool_name: str, tool_input: dict) -> str:
+        """Build a short human-readable label from tool input."""
+        if tool_name in ("Read", "Write", "Edit"):
+            fp = tool_input.get("file_path", "")
+            return os.path.basename(fp) if fp else tool_name
+        if tool_name == "Bash":
+            cmd = tool_input.get("command", "")
+            first_line = cmd.split("\n", 1)[0]
+            return first_line[:50] if first_line else tool_name
+        if tool_name == "Grep":
+            pat = tool_input.get("pattern", "")
+            return f'"{pat[:40]}"' if pat else tool_name
+        if tool_name == "Glob":
+            return tool_input.get("pattern", tool_name)[:50]
+        if tool_name == "WebSearch":
+            return f'"{tool_input.get("query", "")[:40]}"'
+        if tool_name == "Task":
+            return tool_input.get("subagent_type", tool_name)
+        return tool_name
+
+    def handle_pre_tool_use(self, data: dict) -> None:
+        session_id = data.get("session_id", "")
+        tool_name = data.get("tool_name", "")
+        tool_input = data.get("tool_input", {})
+        if not session_id or not tool_name:
+            return
+        label = self._extract_tool_label(tool_name, tool_input)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO tool_event (session_id, tool_name, tool_label) VALUES (?, ?, ?)",
+                (session_id, tool_name, label),
+            )
+            # Lazy ring buffer: prune when count > 100, keep last 50
+            count = conn.execute(
+                "SELECT COUNT(*) FROM tool_event WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            if count > 100:
+                conn.execute(
+                    """DELETE FROM tool_event WHERE session_id = ? AND id NOT IN (
+                        SELECT id FROM tool_event WHERE session_id = ?
+                        ORDER BY created_at DESC LIMIT 50
+                    )""",
+                    (session_id, session_id),
+                )
+            conn.commit()
+        logging.info(f"Tool event: {tool_name} -> {label} session={session_id}")
 
     def handle_subagent_start(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
@@ -375,7 +443,7 @@ def main():
         return
 
     event = sys.argv[1]
-    valid = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "Notification"]
+    valid = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "Notification", "PreToolUse"]
     if event not in valid:
         logging.error(f"Invalid event: {event}")
         sys.exit(1)
@@ -410,6 +478,8 @@ def main():
         send_notification(title, f"Agent done: {agent_type}", loc, "subagent_complete", cwd)
     elif event == "Notification":
         tracker.handle_notification(data)
+    elif event == "PreToolUse":
+        tracker.handle_pre_tool_use(data)
 
 
 if __name__ == "__main__":
