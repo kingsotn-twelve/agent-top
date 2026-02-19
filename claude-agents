@@ -185,10 +185,15 @@ def draw(stdscr, frame: int):
     recent = data["recent_prompts"]
     tool_events = data["tool_events"]
 
-    # Build agents_by_session
+    # Build agents_by_session, track orphans
+    active_sids = {s["session_id"] for s in active}
     agents_by_session: dict[str, list[dict]] = {}
+    orphan_agents: list[dict] = []
     for a in r_agents:
-        agents_by_session.setdefault(a["session_id"], []).append(a)
+        if a["session_id"] in active_sids:
+            agents_by_session.setdefault(a["session_id"], []).append(a)
+        else:
+            orphan_agents.append(a)
 
     total_live = len(active) + len(r_agents)
     row = 0
@@ -297,6 +302,21 @@ def draw(stdscr, frame: int):
                 safe_add(stdscr, row, 3, "\u2514", w, DIM)
                 safe_add(stdscr, row, 5, tool_line[:w - 6], w, DIM)
                 row += 1
+        row += 1
+
+    # Orphan agents (session already closed but agent row wasn't cleaned up)
+    if orphan_agents:
+        for a in orphan_agents:
+            if row >= h - 2:
+                break
+            dur = fmt_dur(a["started_at"])
+            atype = a["agent_type"] or "agent"
+            safe_add(stdscr, row, 1, sc, w, MAGENTA)
+            safe_add(stdscr, row, 3, f"{dur:>6}", w, YELLOW)
+            safe_add(stdscr, row, 10, atype, w, MAGENTA)
+            safe_add(stdscr, row, 10 + len(atype) + 1, short_id(a["agent_id"]), w, DIM)
+            safe_add(stdscr, row, 10 + len(atype) + 1 + 8, "(orphan)", w, DIM)
+            row += 1
         row += 1
 
     # Show idle state when nothing is active

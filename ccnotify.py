@@ -356,6 +356,15 @@ class ClaudePromptTracker:
                 seq = "?"
                 duration = ""
 
+        # Clean up any running agents for this session — they're orphans now
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """UPDATE agent SET stopped_at = CURRENT_TIMESTAMP
+                   WHERE session_id = ? AND stopped_at IS NULL""",
+                (session_id,),
+            )
+            conn.commit()
+
         if is_subagent:
             prefix = "Agent done"
             sound = "subagent_complete"
