@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.3 — Feb 19, 2026
+
+### Dir prefix on tools stats
+The TOOLS stats panel now shows `[dirname]` prefixes too, grouped by both directory and tool name — matching the same column-aligned layout as the AGENTS panel.
+
+---
+
 ## v0.2.2 — Feb 19, 2026
 
 ### Aligned columns in agents stats panel

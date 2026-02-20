@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -122,9 +122,11 @@ def query_db(db_path: str) -> dict:
         try:
             data["top_tools"] = [
                 dict(r) for r in conn.execute(
-                    """SELECT tool_name, COUNT(*) as cnt FROM tool_event
-                       WHERE created_at > datetime('now', '-7 days')
-                       GROUP BY tool_name ORDER BY cnt DESC LIMIT 8"""
+                    """SELECT te.tool_name, p.cwd, COUNT(*) as cnt
+                       FROM tool_event te
+                       LEFT JOIN prompt p ON te.session_id = p.session_id
+                       WHERE te.created_at > datetime('now', '-7 days')
+                       GROUP BY te.tool_name, p.cwd ORDER BY cnt DESC LIMIT 12"""
                 )
             ]
         except sqlite3.OperationalError:
@@ -607,13 +609,18 @@ def draw(stdscr, frame: int, state: dict):
                 safe_add(stdscr, pr, rs, " TOOLS   7d", w, CYAN)
                 pr += 1
                 max_t = top_tools[0]["cnt"] if top_tools else 1
+                ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
+                tname_w = max((len(e["tool_name"] or "?") for e in top_tools), default=0)
                 for entry in top_tools:
                     if pr >= h - 1:
                         break
-                    tname = (entry["tool_name"] or "?")[:10]
+                    tag = dir_tag(entry.get("cwd", ""))
+                    tname = entry["tool_name"] or "?"
                     cnt = entry["cnt"]
                     bar = _bar(cnt, max_t)
-                    safe_add(stdscr, pr, rs, f" {tname:<10} {bar} {cnt}", w, DIM)
+                    col1 = tag.ljust(ttag_w)
+                    col2 = tname.ljust(tname_w)
+                    safe_add(stdscr, pr, rs, f" {col1}  {col2}  {bar} {cnt}", w, DIM)
                     pr += 1
 
     # -- Footer (full width) --
