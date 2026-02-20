@@ -5,10 +5,20 @@ Tree view: agents nested under sessions, tool feed for agentless sessions.
 Run in a separate pane: claude-agents
 """
 
+import argparse
 import curses
+import glob
+import json
 import os
 import sqlite3
+import subprocess
+import sys
+import time
 from datetime import datetime
+
+VERSION = "0.1.0"
+
+PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
 DB_PATH = os.path.expanduser("~/.claude/ccnotify/ccnotify.db")
 
@@ -24,6 +34,8 @@ def query_db(db_path: str) -> dict:
         "completed_agents": [],
         "recent_prompts": [],
         "tool_events": {},  # session_id -> [{tool_name, tool_label}]
+        "top_agents": [],
+        "top_tools": [],
     }
     if not os.path.exists(db_path):
         return data
@@ -51,7 +63,7 @@ def query_db(db_path: str) -> dict:
 
         # Running agents (skip ghosts with empty type)
         for row in conn.execute(
-            """SELECT agent_id, agent_type, session_id, cwd, started_at
+            """SELECT agent_id, agent_type, session_id, cwd, started_at, transcript_path
                FROM agent
                WHERE stopped_at IS NULL
                ORDER BY started_at ASC"""
@@ -96,11 +108,126 @@ def query_db(db_path: str) -> dict:
                 # Reverse so oldest is first (left-to-right reading)
                 data["tool_events"][sid] = list(reversed(tools))
 
+        # Usage stats: top agent types + top tools (last 7 days)
+        try:
+            data["top_agents"] = [
+                dict(r) for r in conn.execute(
+                    """SELECT agent_type, COUNT(*) as cnt FROM agent
+                       WHERE started_at > datetime('now', '-7 days') AND agent_type != ''
+                       GROUP BY agent_type ORDER BY cnt DESC LIMIT 8"""
+                )
+            ]
+        except sqlite3.OperationalError:
+            data["top_agents"] = []
+        try:
+            data["top_tools"] = [
+                dict(r) for r in conn.execute(
+                    """SELECT tool_name, COUNT(*) as cnt FROM tool_event
+                       WHERE created_at > datetime('now', '-7 days')
+                       GROUP BY tool_name ORDER BY cnt DESC LIMIT 8"""
+                )
+            ]
+        except sqlite3.OperationalError:
+            data["top_tools"] = []
+
         conn.close()
     except sqlite3.OperationalError:
         pass
 
     return data
+
+
+def find_transcript(agent_id: str) -> str:
+    uid = os.getuid()
+    for pattern in [
+        f"/private/tmp/claude-{uid}/**/tasks/*{agent_id}*.output",
+        f"/tmp/claude-{uid}/**/tasks/*{agent_id}*.output",
+        os.path.expanduser(f"~/.claude/projects/**/*{agent_id}*.jsonl"),
+        os.path.expanduser(f"~/.claude/**/*{agent_id}*.jsonl"),
+    ]:
+        try:
+            matches = glob.glob(pattern, recursive=True)
+            if matches:
+                return sorted(matches, key=os.path.getmtime, reverse=True)[0]
+        except Exception:
+            pass
+    return ""
+
+
+_JSONL_FMT = (
+    "python3 -u -c \""
+    "import sys,json\n"
+    "for line in sys.stdin:\n"
+    "  try:\n"
+    "    e=json.loads(line)\n"
+    "    t=e.get('type','')\n"
+    "    if t=='assistant':\n"
+    "      c=e.get('message',e).get('content',e.get('content',''))\n"
+    "      if isinstance(c,list):\n"
+    "        txt=''.join(b.get('text','') for b in c if b.get('type')=='text')\n"
+    "      else:\n"
+    "        txt=str(c)\n"
+    "      if txt.strip(): print(txt,flush=True)\n"
+    "    elif t=='tool_use':\n"
+    "      print(f\\\"  [{e.get('name','')}]\\\",flush=True)\n"
+    "  except:pass\n"
+    "\""
+)
+
+
+def read_preview_lines(agent: dict, n: int) -> list[str]:
+    """Return the last n displayable lines from an agent's output file."""
+    transcript = agent.get("transcript_path") or ""
+    if not transcript or not os.path.exists(transcript):
+        transcript = find_transcript(agent["agent_id"])
+    if not transcript or not os.path.exists(transcript):
+        return ["(no output yet)"]
+    try:
+        with open(transcript, "r", errors="replace") as f:
+            raw = f.read()
+        if transcript.endswith(".jsonl"):
+            lines: list[str] = []
+            for line in raw.splitlines():
+                try:
+                    e = json.loads(line)
+                    t = e.get("type", "")
+                    if t == "assistant":
+                        c = e.get("message", e).get("content", e.get("content", ""))
+                        txt = "".join(b.get("text", "") for b in c if b.get("type") == "text") if isinstance(c, list) else str(c)
+                        lines.extend(ln for ln in txt.splitlines() if ln.strip())
+                    elif t == "tool_use":
+                        lines.append(f"[{e.get('name', '?')}]")
+                except Exception:
+                    pass
+        else:
+            lines = [ln for ln in raw.splitlines() if ln.strip()]
+        return lines[-n:] if lines else ["(no output yet)"]
+    except Exception as exc:
+        return [f"(read error: {exc})"]
+
+
+def open_agent_in_iterm2(agent: dict) -> str:
+    transcript = agent.get("transcript_path") or ""
+    if not transcript or not os.path.exists(transcript):
+        transcript = find_transcript(agent["agent_id"])
+    if not transcript or not os.path.exists(transcript):
+        return "no transcript found"
+
+    if transcript.endswith(".jsonl"):
+        tail_cmd = f"tail -f '{transcript}' | {_JSONL_FMT}"
+    else:
+        tail_cmd = f"tail -f '{transcript}'"
+
+    script = f"""tell application "iTerm2"
+  tell current window
+    create tab with default profile
+    tell current session of current tab
+      write text "{tail_cmd}"
+    end tell
+  end tell
+end tell"""
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return f"iTerm2: {r.stderr.strip()[:60]}" if r.returncode != 0 else ""
 
 
 def fmt_dur(start_str: str, end_str: str | None = None) -> str:
@@ -152,7 +279,7 @@ def safe_add(stdscr, row: int, col: int, text: str, width: int, attr=0):
         pass
 
 
-def draw(stdscr, frame: int):
+def draw(stdscr, frame: int, state: dict):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
 
@@ -195,10 +322,26 @@ def draw(stdscr, frame: int):
         else:
             orphan_agents.append(a)
 
+    # Hstack layout: always split left/right when terminal wide enough
+    top_agents = data.get("top_agents", [])
+    top_tools = data.get("top_tools", [])
+    has_right_content = bool(top_agents or top_tools)
+    split = w >= 80 and has_right_content
+    lw = (w * 3) // 5 if split else w   # left panel width
+    rs = lw + 1                          # right panel start col
+    rw = w - rs                          # right panel width
+
+    # Left-panel safe_add (clips to left panel)
+    def L(r, c, text, attr=0):
+        safe_add(stdscr, r, c, text, lw, attr)
+
+    # Reset visible agent list for keyboard nav
+    visible_agents: list[dict] = []
+
     total_live = len(active) + len(r_agents)
     row = 0
 
-    # -- Title bar --
+    # -- Title bar (full width) --
     now = datetime.utcnow().strftime("%H:%M:%S")
     if total_live > 0:
         title = f" {sc} CLAUDE AGENTS"
@@ -207,7 +350,7 @@ def draw(stdscr, frame: int):
             counts.append(f"{len(active)} running")
         if r_agents:
             counts.append(f"{len(r_agents)} agent{'s' if len(r_agents) != 1 else ''}")
-        count_str = f"  {' \u00b7 '.join(counts)}"
+        count_str = f"  {' · '.join(counts)}"
         title_attr = YELLOW
     else:
         title = "   CLAUDE AGENTS"
@@ -218,10 +361,11 @@ def draw(stdscr, frame: int):
     safe_add(stdscr, row, len(title), count_str, w, DIM)
     safe_add(stdscr, row, w - len(now) - 1, now, w, DIM)
     row += 1
-    safe_add(stdscr, row, 0, "\u2501" * w, w, DIM)
+    safe_add(stdscr, row, 0, "━" * w, w, DIM)
     row += 1
+    content_top = row  # first content row (for right panel to start at)
 
-    # -- Sessions (tree view) --
+    # -- Sessions (tree view, left panel) --
     if active:
         n_running = sum(
             1 for s in active
@@ -235,7 +379,7 @@ def draw(stdscr, frame: int):
             counts.append(f"{n_waiting} waiting")
         if r_agents:
             counts.append(f"{len(r_agents)} agent{'s' if len(r_agents) != 1 else ''}")
-        safe_add(stdscr, row, 0, f" SESSIONS ({' \u00b7 '.join(counts)})", w, CYAN)
+        L(row, 0, f" SESSIONS ({' · '.join(counts)})", CYAN)
         row += 1
 
         for s in active:
@@ -246,15 +390,14 @@ def draw(stdscr, frame: int):
             has_agents = len(child_agents) > 0
             waiting = bool(s.get("lastWaitUserAt")) and not has_agents
             sid_short = short_session(sid)
-            prompt = short_prompt(s.get("prompt"), max(10, w - 22))
+            prompt = short_prompt(s.get("prompt"), max(10, lw - 22))
 
             if waiting:
-                # Show how long it's been waiting for input, not total session time
                 wait_dur = fmt_dur(s["lastWaitUserAt"])
-                safe_add(stdscr, row, 1, "○", w, YELLOW)
-                safe_add(stdscr, row, 3, f"~{wait_dur:>5}", w, DIM)
-                safe_add(stdscr, row, 10, sid_short, w, DIM)
-                safe_add(stdscr, row, 17, prompt, w, DIM)
+                L(row, 1, "○", YELLOW)
+                L(row, 3, f"~{wait_dur:>5}", DIM)
+                L(row, 10, sid_short, DIM)
+                L(row, 17, prompt, DIM)
             else:
                 run_dur = fmt_dur(s["created_at"])
                 dur_attr = GREEN
@@ -266,10 +409,10 @@ def draw(stdscr, frame: int):
                         dur_attr = YELLOW
                 except Exception:
                     pass
-                safe_add(stdscr, row, 1, pulse, w, GREEN)
-                safe_add(stdscr, row, 3, f"{run_dur:>6}", w, dur_attr)
-                safe_add(stdscr, row, 10, sid_short, w, DIM)
-                safe_add(stdscr, row, 17, prompt, w, WHITE)
+                L(row, 1, pulse, GREEN)
+                L(row, 3, f"{run_dur:>6}", dur_attr)
+                L(row, 10, sid_short, DIM)
+                L(row, 17, prompt, WHITE)
             row += 1
 
             # Child agents (tree connectors)
@@ -278,61 +421,82 @@ def draw(stdscr, frame: int):
                     if row >= h - 2:
                         break
                     is_last = (i == len(child_agents) - 1)
-                    connector = "\u2514" if is_last else "\u251c"
+                    connector = "└" if is_last else "├"
                     adur = fmt_dur(a["started_at"])
                     atype = a["agent_type"] or "agent"
                     aid = short_id(a["agent_id"])
+                    vidx = len(visible_agents)
+                    visible_agents.append(a)
+                    is_sel = (vidx == state.get("selected", -1))
 
-                    safe_add(stdscr, row, 3, connector, w, DIM)
-                    safe_add(stdscr, row, 5, sc, w, MAGENTA)
-                    safe_add(stdscr, row, 7, f"{adur:>5}", w, YELLOW)
-                    safe_add(stdscr, row, 13, atype, w, MAGENTA)
-                    safe_add(stdscr, row, 13 + len(atype) + 1, aid, w, DIM)
+                    if is_sel:
+                        try:
+                            stdscr.addnstr(row, 0, " " * (lw - 1), lw - 1, curses.A_REVERSE)
+                        except curses.error:
+                            pass
+                        L(row, 3, connector, DIM | curses.A_REVERSE)
+                        L(row, 5, "▶", YELLOW | curses.A_REVERSE)
+                        L(row, 7, f"{adur:>5}", YELLOW | curses.A_REVERSE)
+                        L(row, 13, atype, curses.A_REVERSE | curses.A_BOLD)
+                        L(row, 13 + len(atype) + 1, aid, curses.A_REVERSE)
+                    else:
+                        L(row, 3, connector, DIM)
+                        L(row, 5, sc, MAGENTA)
+                        L(row, 7, f"{adur:>5}", YELLOW)
+                        L(row, 13, atype, MAGENTA)
+                        L(row, 13 + len(atype) + 1, aid, DIM)
                     row += 1
             elif sid in tool_events:
-                # No agents — show recent tool calls
                 tools = tool_events[sid]
                 parts = []
                 for t in tools:
                     name = t["tool_name"]
                     label = t["tool_label"]
-                    if label and label != name:
-                        parts.append(f"{name}\u2192{label}")
-                    else:
-                        parts.append(name)
-                tool_line = "  ".join(parts)
-                safe_add(stdscr, row, 3, "\u2514", w, DIM)
-                safe_add(stdscr, row, 5, tool_line[:w - 6], w, DIM)
+                    parts.append(f"{name}→{label}" if label and label != name else name)
+                L(row, 3, "└", DIM)
+                L(row, 5, "  ".join(parts)[:lw - 6], DIM)
                 row += 1
         row += 1
 
-    # Orphan agents (session already closed but agent row wasn't cleaned up)
+    # Orphan agents — selectable too
     if orphan_agents:
         for a in orphan_agents:
             if row >= h - 2:
                 break
             dur = fmt_dur(a["started_at"])
             atype = a["agent_type"] or "agent"
-            safe_add(stdscr, row, 1, sc, w, MAGENTA)
-            safe_add(stdscr, row, 3, f"{dur:>6}", w, YELLOW)
-            safe_add(stdscr, row, 10, atype, w, MAGENTA)
-            safe_add(stdscr, row, 10 + len(atype) + 1, short_id(a["agent_id"]), w, DIM)
-            safe_add(stdscr, row, 10 + len(atype) + 1 + 8, "(orphan)", w, DIM)
+            vidx = len(visible_agents)
+            visible_agents.append(a)
+            is_sel = (vidx == state.get("selected", -1))
+
+            if is_sel:
+                try:
+                    stdscr.addnstr(row, 0, " " * (lw - 1), lw - 1, curses.A_REVERSE)
+                except curses.error:
+                    pass
+                L(row, 1, "▶", YELLOW | curses.A_REVERSE)
+                L(row, 3, f"{dur:>6}", YELLOW | curses.A_REVERSE)
+                L(row, 10, atype, curses.A_REVERSE | curses.A_BOLD)
+                L(row, 10 + len(atype) + 1, short_id(a["agent_id"]), curses.A_REVERSE)
+            else:
+                L(row, 1, sc, MAGENTA)
+                L(row, 3, f"{dur:>6}", YELLOW)
+                L(row, 10, atype, MAGENTA)
+                L(row, 10 + len(atype) + 1, short_id(a["agent_id"]), DIM)
             row += 1
         row += 1
 
     # Show idle state when nothing is active
     if not active and not r_agents:
-        safe_add(stdscr, row, 0, " no active sessions or agents", w, DIM)
+        L(row, 0, " no active sessions or agents", DIM)
         row += 2
 
-    # -- History --
-    safe_add(stdscr, row, 0, "\u2501" * w, w, DIM)
+    # -- History (left panel) --
+    L(row, 0, "━" * lw, DIM)
     row += 1
-    safe_add(stdscr, row, 0, " HISTORY", w, CYAN)
+    L(row, 0, " HISTORY", CYAN)
     row += 1
 
-    # Merge agents and prompts, sorted by time desc
     history = []
     for a in c_agents:
         history.append(("agent", a["stopped_at"], a))
@@ -341,34 +505,98 @@ def draw(stdscr, frame: int):
     history.sort(key=lambda x: x[1] or "", reverse=True)
 
     if not history:
-        safe_add(stdscr, row, 0, "   (empty)", w, DIM)
-        row += 1
+        L(row, 0, "   (empty)", DIM)
     else:
         shown = 0
         for kind, ts, item in history:
             if row >= h - 1 or shown >= MAX_HISTORY:
                 break
             t = fmt_time(ts)
-
             if kind == "agent":
                 dur = fmt_dur(item["started_at"], item["stopped_at"])
                 atype = item.get("agent_type") or "agent"
-                safe_add(stdscr, row, 1, t, w, DIM)
-                safe_add(stdscr, row, 10, f"{dur:>6}", w, DIM)
-                safe_add(stdscr, row, 17, f"\u25b8 {atype}", w, curses.color_pair(6))
+                L(row, 1, t, DIM)
+                L(row, 10, f"{dur:>6}", DIM)
+                L(row, 17, f"▸ {atype}", curses.color_pair(6))
             else:
                 dur = fmt_dur(item["created_at"], item["stoped_at"])
-                prompt = short_prompt(item.get("prompt"), max(10, w - 19))
+                prompt = short_prompt(item.get("prompt"), max(10, lw - 19))
                 if not prompt:
-                    continue  # skip empty/system prompts
-                safe_add(stdscr, row, 1, t, w, DIM)
-                safe_add(stdscr, row, 10, f"{dur:>6}", w, DIM)
-                safe_add(stdscr, row, 17, prompt, w, DIM)
+                    continue
+                L(row, 1, t, DIM)
+                L(row, 10, f"{dur:>6}", DIM)
+                L(row, 17, prompt, DIM)
             row += 1
             shown += 1
 
-    # -- Footer --
-    safe_add(stdscr, h - 1, 0, " q=quit \u2502 1s refresh", w, DIM)
+    # Clamp selection to visible agents
+    state["visible_agents"] = visible_agents
+    if visible_agents:
+        state["selected"] = max(-1, min(state.get("selected", -1), len(visible_agents) - 1))
+    else:
+        state["selected"] = -1
+
+    # -- Right panel: divider + preview (if agent selected) or stats --
+    sel_idx = state.get("selected", -1)
+    sel_agent = visible_agents[sel_idx] if 0 <= sel_idx < len(visible_agents) else None
+    if split and rw > 10:
+        # Vertical divider
+        for r in range(content_top, h - 1):
+            safe_add(stdscr, r, lw, "│", w, DIM)
+
+        pr = content_top
+
+        if sel_agent:
+            # Live preview of selected agent
+            dur = fmt_dur(sel_agent["started_at"])
+            atype = sel_agent.get("agent_type") or "agent"
+            aid = sel_agent["agent_id"][:7]
+            safe_add(stdscr, pr, rs, f" {aid} · {atype} · {dur}"[:rw], w, MAGENTA | curses.A_BOLD)
+            pr += 1
+            safe_add(stdscr, pr, rs, "─" * (rw - 1), w, DIM)
+            pr += 1
+            for line in read_preview_lines(sel_agent, h - pr - 1):
+                if pr >= h - 1:
+                    break
+                safe_add(stdscr, pr, rs, line[:rw - 1], w, WHITE)
+                pr += 1
+        else:
+            # Stats: agent type ranking + tool ranking
+            def _bar(val: int, max_val: int, bw: int = 8) -> str:
+                filled = int(val / max_val * bw) if max_val > 0 else 0
+                return "█" * filled + "░" * (bw - filled)
+
+            safe_add(stdscr, pr, rs, " AGENTS  7d", w, CYAN)
+            pr += 1
+            max_a = top_agents[0]["cnt"] if top_agents else 1
+            for entry in top_agents:
+                if pr >= h - 1:
+                    break
+                atype = (entry["agent_type"] or "?")[:10]
+                cnt = entry["cnt"]
+                bar = _bar(cnt, max_a)
+                safe_add(stdscr, pr, rs, f" {atype:<10} {bar} {cnt}", w, DIM)
+                pr += 1
+
+            pr += 1
+            if top_tools and pr < h - 2:
+                safe_add(stdscr, pr, rs, " TOOLS   7d", w, CYAN)
+                pr += 1
+                max_t = top_tools[0]["cnt"] if top_tools else 1
+                for entry in top_tools:
+                    if pr >= h - 1:
+                        break
+                    tname = (entry["tool_name"] or "?")[:10]
+                    cnt = entry["cnt"]
+                    bar = _bar(cnt, max_t)
+                    safe_add(stdscr, pr, rs, f" {tname:<10} {bar} {cnt}", w, DIM)
+                    pr += 1
+
+    # -- Footer (full width) --
+    if visible_agents:
+        safe_add(stdscr, h - 1, 0, " j/k=select  q=quit", w, DIM)
+    else:
+        safe_add(stdscr, h - 1, 0, " q=quit │ 1s refresh", w, DIM)
     stdscr.refresh()
 
 
@@ -376,17 +604,47 @@ def main(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(1000)
+    stdscr.keypad(True)
 
+    state: dict = {"selected": -1, "visible_agents": [], "status_msg": "", "status_until": 0.0}
     frame = 0
     while True:
-        draw(stdscr, frame)
+        draw(stdscr, frame, state)
         frame += 1
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q"), 27):
             break
+        elif ch in (ord("j"), curses.KEY_DOWN):
+            agents = state["visible_agents"]
+            if agents:
+                state["selected"] = min(state["selected"] + 1, len(agents) - 1) if state["selected"] >= 0 else 0
+        elif ch in (ord("k"), curses.KEY_UP):
+            if state["selected"] > 0:
+                state["selected"] -= 1
+        elif ch in (10, 13, curses.KEY_ENTER):
+            idx = state["selected"]
+            agents = state["visible_agents"]
+            if 0 <= idx < len(agents):
+                err = open_agent_in_iterm2(agents[idx])
+                atype = (agents[idx].get("agent_type") or "agent")[:12]
+                short = agents[idx]["agent_id"][:7]
+                state["status_msg"] = err if err else f"opened tab: {atype}-{short}"
+                state["status_until"] = time.time() + 3
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        prog="claude-agents",
+        description="Live terminal dashboard for Claude Code sessions & agents.\n"
+                    "Tree view: agents nested under sessions, tool feed for agentless sessions.\n"
+                    "Run in a separate pane alongside Claude Code.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"claude-agents v{VERSION}"
+    )
+    parser.parse_args()
+
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
