@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.1 — Feb 20, 2026
+
+### Smarter session staleness
+
+Sessions killed without `Stop` firing (closed terminal, Ctrl+C mid-turn) used to stay visible in the dashboard for up to 2 hours. Now a session is only shown as active if it has had tool activity in the last 10 minutes, is waiting for user input within 30 minutes, or was just started within 5 minutes. Stale sessions disappear in under a minute.
+
+When `Stop` does fire, it now clears all un-stopped rows for the session — not just the latest — so any rows accumulated from previous failures are cleaned up atomically.
+
+---
+
 ## v0.3.0 — Feb 19, 2026
 
 ### Install script

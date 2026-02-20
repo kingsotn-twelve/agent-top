@@ -4,7 +4,6 @@ Live terminal dashboard for monitoring Claude Code sessions and agents.
 
 <img width="2168" height="1397" alt="image" src="https://github.com/user-attachments/assets/fe40f379-becf-47bb-a93a-fbc48ccab12d" />
 
-
 ## Setup
 
 ```bash
@@ -13,11 +12,11 @@ cd claude-agents
 ./install.sh
 ```
 
-`install.sh` copies `ccnotify.py` to `~/.claude/ccnotify/` and `claude-agents` to `~/.local/bin/` so it's on your PATH. It also prints the exact hook config to paste into `~/.claude/settings.json`.
+`install.sh` copies `ccnotify.py` to `~/.claude/ccnotify/` and `claude-agents` to `~/.local/bin/`. It also prints the exact hook config to paste into `~/.claude/settings.json`.
 
-### Manual hook config
+### Hook config
 
-After running `install.sh`, add the printed block to `~/.claude/settings.json`. It looks like:
+Add this block to `~/.claude/settings.json`:
 
 ```json
 {
@@ -40,44 +39,71 @@ claude-agents
 
 Open in a split pane alongside your Claude Code session. Press `q` to quit.
 
+## Uninstall
+
+```bash
+rm ~/.local/bin/claude-agents
+rm -rf ~/.claude/ccnotify/
+```
+
+Then remove the hooks block from `~/.claude/settings.json`.
+
+## What it shows
+
+```
+ SESSIONS (2 running · 3 agents)
+ ◎   1m23s 15b04e implement dark mode
+   ├ ⠹  45s [rodeo]   Explore a3f82bc
+   └ ⠹  12s [rodeo]   Plan    b9d1e34
+ ◎     14s a3f82b fix auth bug
+   └ ⠹   8s [tl-api]  Bash    c7a2f90
+ ○   5m02s 9c1d3a (waiting)
+   └ Read→handler.go  Grep→"auth"
+```
+
+| Element | Description |
+|---------|-------------|
+| Session line | Active session with spinner, elapsed time, session ID, and prompt. Green = running, dim = waiting for input |
+| Child agents | Running subagents nested under their parent with `├`/`└` connectors, showing `[dirname]` tag, type, ID, and elapsed time |
+| Tool feed | Last 3 tool calls inline for agentless sessions (e.g. `Read→file.go`, `Bash→make test`) |
+| Right panel | 7-day bar charts for top agent types and tools, or live transcript preview when an agent is selected |
+| History | Interleaved timeline of completed agents (▸) and finished prompts |
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Select next agent |
+| `k` / `↑` | Select previous agent |
+| `Enter` | Open selected agent's transcript in a new iTerm2 tab (`tail -f`) |
+| `q` | Quit |
+
 ## Test it
 
-Run the included test script to verify the dashboard without needing a live Claude session:
+Verify the dashboard without a live Claude session:
 
 ```bash
 ./test-agents.sh          # 5 agents, 5–20s
 ./test-agents.sh 3 2 8    # 3 agents, 2–8s
 ```
 
-Agents appear nested under a test session with live elapsed timers. As each finishes it moves to HISTORY.
+Agents appear nested under a test session with live timers. As each finishes it moves to HISTORY.
 
 ## How it works
 
-- **ccnotify.py** — Claude Code hook handler that logs session, agent, and tool lifecycle events to a SQLite database
-- **claude-agents** — curses TUI that polls the database and renders a live tree-view dashboard
+- **ccnotify.py** — Claude Code hook handler. Logs session, agent, and tool lifecycle events to SQLite. Fires macOS desktop notifications with sounds on task complete, waiting for input, and agent done.
+- **claude-agents** — curses TUI that polls the database every second and renders a live tree-view dashboard.
 
-Sessions are tracked via `UserPromptSubmit` (start) and `Stop` (end). Agents are tracked via `SubagentStart` and `SubagentStop`. Tool usage is tracked via `PreToolUse`.
+Sessions are tracked via `UserPromptSubmit` (start) and `Stop` (end). Agents are tracked via `SubagentStart` / `SubagentStop`. Tool usage is tracked via `PreToolUse`.
 
-## What it shows
+A session is considered active if it has had tool activity in the last 10 minutes, is waiting for user input (within 30 minutes), or was just started (within 5 minutes). This means sessions killed without `Stop` firing disappear quickly rather than staying visible for hours.
 
-```
- SESSIONS (2 running · 3 agents)
- ⠹   1m23s 15b04e implement dark mode
-   ├ ⠹  45s Explore a3f82bc
-   └ ⠹  12s Plan    b9d1e34
- ⠹     14s a3f82b fix auth bug
-   └ ⠹   8s Bash    c7a2f90
- ◦   5m02s 9c1d3a (waiting)
-   └ Read→handler.go  Grep→"auth"
-```
+## Configuration
 
-| Element | Description |
-|---------|-------------|
-| Session line | Active Claude session with spinner, elapsed time, session ID, and prompt text. Green = running, yellow/dim = waiting for input |
-| Child agents | Running subagents (Explore, Plan, Bash, etc.) nested under their parent session with `├`/`└` connectors |
-| Tool feed | Last 3 tool calls shown inline for sessions without agents (e.g. `Read→file.go`, `Bash→make test`, `Grep→"auth"`) |
-| History | Interleaved timeline of completed agents (▸) and prompts |
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `CLAUDE_AGENTS_DB` | `~/.claude/ccnotify/ccnotify.db` | Path to the SQLite database |
 
-### Session cleanup
+## License
 
-When a session stops, all its running agents are automatically marked as stopped. Orphan agents (from crashes or missed Stop events) render with an `(orphan)` tag until the 2-hour session expiry.
+MIT
