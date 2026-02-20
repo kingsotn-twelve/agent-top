@@ -99,14 +99,6 @@ Sessions are tracked via `UserPromptSubmit` (start) and `Stop` (end). Agents are
 | Tool feed | Last 3 tool calls shown inline for sessions without agents (e.g. `Read→file.go`, `Bash→make test`, `Grep→"auth"`) |
 | History | Interleaved timeline of completed agents (▸) and prompts |
 
-### Duration color coding
-
-| Color | Meaning |
-|-------|---------|
-| Green | < 2 minutes |
-| Yellow | 2-10 minutes |
-| Red | > 10 minutes |
-
 ### Session cleanup
 
 When a session stops, all its running agents are automatically marked as stopped. Orphan agents (from crashes or missed Stop events) render with an `(orphan)` tag until the 2-hour session expiry.
