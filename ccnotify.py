@@ -222,6 +222,14 @@ class ClaudePromptTracker:
                 CREATE INDEX IF NOT EXISTS idx_tool_event_session
                     ON tool_event (session_id, created_at DESC)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS team_session (
+                    session_id TEXT PRIMARY KEY,
+                    team_name TEXT NOT NULL,
+                    teammate_name TEXT NOT NULL,
+                    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             # Prune tool events older than 24h
             conn.execute("""
                 DELETE FROM tool_event
@@ -309,6 +317,41 @@ class ClaudePromptTracker:
             )
             conn.commit()
         logging.info(f"Agent stopped: {agent_type} id={agent_id} session={session_id}")
+
+    def handle_teammate_idle(self, data: dict) -> None:
+        session_id = data.get("session_id", "")
+        team_name = data.get("team_name", "")
+        teammate_name = data.get("teammate_name", "")
+        cwd = data.get("cwd", "")
+        if session_id and team_name:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO team_session
+                           (session_id, team_name, teammate_name, last_seen_at)
+                       VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
+                    (session_id, team_name, teammate_name),
+                )
+                conn.commit()
+        iterm = iterm_info()
+        title = iterm["window"] or os.path.basename(cwd)
+        loc = _location_label(iterm)
+        label = teammate_name or "teammate"
+        send_notification(title, f"Idle: {label}", loc, "task_complete", cwd)
+        logging.info(f"TeammateIdle: {teammate_name} team={team_name} session={session_id}")
+
+    def handle_task_completed(self, data: dict) -> None:
+        team_name = data.get("team_name", "")
+        task_subject = data.get("task_subject", "task")
+        teammate_name = data.get("teammate_name", "")
+        cwd = data.get("cwd", "")
+        iterm = iterm_info()
+        title = iterm["window"] or (f"[{team_name}]" if team_name else os.path.basename(cwd))
+        subtitle = f"✓ {task_subject}"
+        if teammate_name:
+            subtitle += f"  ({teammate_name})"
+        loc = _location_label(iterm)
+        send_notification(title, subtitle, loc, "task_complete", cwd)
+        logging.info(f"TaskCompleted: {task_subject!r} team={team_name} teammate={teammate_name}")
 
     def handle_user_prompt_submit(self, data: dict) -> None:
         session_id = data.get("session_id")
@@ -454,7 +497,8 @@ def main():
         return
 
     event = sys.argv[1]
-    valid = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "Notification", "PreToolUse"]
+    valid = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "Notification", "PreToolUse",
+             "TeammateIdle", "TaskCompleted"]
     if event not in valid:
         logging.error(f"Invalid event: {event}")
         sys.exit(1)
@@ -491,6 +535,10 @@ def main():
         tracker.handle_notification(data)
     elif event == "PreToolUse":
         tracker.handle_pre_tool_use(data)
+    elif event == "TeammateIdle":
+        tracker.handle_teammate_idle(data)
+    elif event == "TaskCompleted":
+        tracker.handle_task_completed(data)
 
 
 if __name__ == "__main__":

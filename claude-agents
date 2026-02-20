@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 VERSION = "0.3.1"
 
@@ -150,6 +150,91 @@ def query_db(db_path: str) -> dict:
     return data
 
 
+def read_team_tasks(team_name: str) -> list[dict]:
+    """Read task JSON files from ~/.claude/tasks/{team_name}/."""
+    tasks_dir = os.path.expanduser(f"~/.claude/tasks/{team_name}")
+    if not os.path.isdir(tasks_dir):
+        return []
+    tasks = []
+    try:
+        for path in glob.glob(os.path.join(tasks_dir, "*.json")):
+            try:
+                with open(path, "r", errors="replace") as f:
+                    obj = json.load(f)
+                if isinstance(obj, dict) and "status" in obj and "subject" in obj:
+                    tasks.append(obj)
+                elif isinstance(obj, list):
+                    # Some implementations store all tasks in one file
+                    for item in obj:
+                        if isinstance(item, dict) and "status" in item and "subject" in item:
+                            tasks.append(item)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return tasks
+
+
+def query_teams(db_path: str, active_session_ids: set[str]) -> dict:
+    """Read team config files + task files; supplement with team_session DB table."""
+    result: dict = {"teams": [], "team_session_ids": set()}
+    teams_root = os.path.expanduser("~/.claude/teams")
+    team_map: dict[str, dict] = {}  # team_name -> {name, members, tasks}
+
+    # 1. Read file-system team configs
+    if os.path.isdir(teams_root):
+        for config_path in glob.glob(os.path.join(teams_root, "*/config.json")):
+            try:
+                with open(config_path, "r", errors="replace") as f:
+                    cfg = json.load(f)
+                team_name = cfg.get("name") or os.path.basename(os.path.dirname(config_path))
+                members = []
+                for m in cfg.get("members", []):
+                    agent_id = m.get("agentId", "")
+                    if agent_id:
+                        members.append({
+                            "session_id": agent_id,
+                            "teammate_name": m.get("name", ""),
+                            "agent_type": m.get("agentType", ""),
+                        })
+                        result["team_session_ids"].add(agent_id)
+                tasks = read_team_tasks(team_name)
+                team_map[team_name] = {"name": team_name, "members": members, "tasks": tasks}
+            except Exception:
+                pass
+
+    # 2. Supplement with team_session DB table (catches teammates not yet in config files)
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute("SELECT session_id, team_name, teammate_name FROM team_session"):
+                sid, tname, mname = row["session_id"], row["team_name"], row["teammate_name"]
+                result["team_session_ids"].add(sid)
+                if tname not in team_map:
+                    team_map[tname] = {"name": tname, "members": [], "tasks": []}
+                # Only add member if not already in list
+                existing = {m["session_id"] for m in team_map[tname]["members"]}
+                if sid not in existing:
+                    team_map[tname]["members"].append({
+                        "session_id": sid,
+                        "teammate_name": mname,
+                        "agent_type": "",
+                    })
+            conn.close()
+        except Exception:
+            pass
+
+    # 3. Filter to only teams that have at least one member active
+    for team in team_map.values():
+        active_members = [m for m in team["members"] if m["session_id"] in active_session_ids]
+        if active_members:
+            team["members"] = active_members
+            result["teams"].append(team)
+
+    return result
+
+
 def dir_tag(cwd: str) -> str:
     """Return a short [dirname] prefix from a cwd path."""
     if not cwd:
@@ -254,7 +339,7 @@ end tell"""
 def fmt_dur(start_str: str, end_str: str | None = None) -> str:
     try:
         start = datetime.fromisoformat(start_str)
-        end = datetime.fromisoformat(end_str) if end_str else datetime.utcnow()
+        end = datetime.fromisoformat(end_str) if end_str else datetime.now(timezone.utc)
         secs = max(0, int((end - start).total_seconds()))
         if secs < 60:
             return f"{secs}s"
@@ -327,11 +412,21 @@ def draw(stdscr, frame: int, state: dict):
     pulse = ("○", "◎", "●", "◎")[frame % 4]
 
     data = query_db(DB_PATH)
-    active = data["active_sessions"]
+    active_all = data["active_sessions"]
     r_agents = data["running_agents"]
     c_agents = data["completed_agents"]
     recent = data["recent_prompts"]
     tool_events = data["tool_events"]
+
+    # Resolve teams from file system + DB
+    active_sids_all = {s["session_id"] for s in active_all}
+    team_data = query_teams(DB_PATH, active_sids_all)
+    team_session_ids = team_data["team_session_ids"]
+    teams = team_data["teams"]
+    session_lookup = {s["session_id"]: s for s in active_all}
+
+    # Solo sessions: exclude team members (shown in TEAMS section instead)
+    active = [s for s in active_all if s["session_id"] not in team_session_ids]
 
     # Build agents_by_session, track orphans
     active_sids = {s["session_id"] for s in active}
@@ -346,7 +441,7 @@ def draw(stdscr, frame: int, state: dict):
     # Hstack layout: always split left/right when terminal wide enough
     top_agents = data.get("top_agents", [])
     top_tools = data.get("top_tools", [])
-    has_right_content = bool(top_agents or top_tools)
+    has_right_content = bool(top_agents or top_tools or teams)
     split = w >= 80 and has_right_content
     lw = (w * 3) // 5 if split else w   # left panel width
     rs = lw + 1                          # right panel start col
@@ -359,16 +454,20 @@ def draw(stdscr, frame: int, state: dict):
     # Reset visible agent list for keyboard nav
     visible_agents: list[dict] = []
 
-    total_live = len(active) + len(r_agents)
+    n_team_members = sum(len(t["members"]) for t in teams)
+    total_live = len(active) + len(r_agents) + n_team_members
     row = 0
 
     # -- Title bar (full width) --
-    now = datetime.utcnow().strftime("%H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
     if total_live > 0:
         title = f" {sc} CLAUDE AGENTS"
         counts = []
+        if teams:
+            tm_count = n_team_members
+            counts.append(f"{len(teams)} team{'s' if len(teams) != 1 else ''} · {tm_count} active")
         if active:
-            counts.append(f"{len(active)} running")
+            counts.append(f"{len(active)} session{'s' if len(active) != 1 else ''}")
         if r_agents:
             counts.append(f"{len(r_agents)} agent{'s' if len(r_agents) != 1 else ''}")
         count_str = f"  {' · '.join(counts)}"
@@ -385,6 +484,93 @@ def draw(stdscr, frame: int, state: dict):
     safe_add(stdscr, row, 0, "━" * w, w, DIM)
     row += 1
     content_top = row  # first content row (for right panel to start at)
+
+    # -- Teams section (left panel) --
+    if teams:
+        # Build header line
+        if len(teams) == 1:
+            t0 = teams[0]
+            tl = t0["tasks"]
+            tdone = sum(1 for x in tl if x.get("status") == "completed")
+            trinp = sum(1 for x in tl if x.get("status") == "in_progress")
+            tpend = sum(1 for x in tl if x.get("status") == "pending")
+            ttotal = len(tl)
+            tparts = []
+            if tdone: tparts.append(f"{tdone}✓")
+            if trinp: tparts.append(f"{trinp}●")
+            if tpend: tparts.append(f"{tpend}○")
+            tcounts = f"  {ttotal} tasks  {' '.join(tparts)}" if ttotal else ""
+            header_str = f" TEAMS ({t0['name']}{tcounts})"
+        else:
+            header_str = f" TEAMS ({len(teams)} teams · {n_team_members} active)"
+        L(row, 0, header_str, CYAN)
+        row += 1
+
+        for team in teams:
+            if row >= h - 2:
+                break
+            if len(teams) > 1:
+                # Sub-header per team with task counts
+                tl = team["tasks"]
+                tdone = sum(1 for x in tl if x.get("status") == "completed")
+                trinp = sum(1 for x in tl if x.get("status") == "in_progress")
+                tpend = sum(1 for x in tl if x.get("status") == "pending")
+                ttotal = len(tl)
+                tparts = []
+                if tdone: tparts.append(f"{tdone}✓")
+                if trinp: tparts.append(f"{trinp}●")
+                if tpend: tparts.append(f"{tpend}○")
+                tcounts = f"  {ttotal} tasks  {' '.join(tparts)}" if ttotal else ""
+                L(row, 1, f"◈ {team['name']}{tcounts}", CYAN)
+                row += 1
+                base = 3
+            else:
+                base = 1
+
+            members = team["members"]
+            for i, m in enumerate(members):
+                if row >= h - 2:
+                    break
+                is_last = (i == len(members) - 1)
+                connector = "└─" if is_last else "├─"
+                sess = session_lookup.get(m["session_id"], {})
+                started_at = sess.get("created_at", "")
+                dur = fmt_dur(started_at) if started_at else "?"
+                teammate_name = m.get("teammate_name") or "teammate"
+                sid_short = short_session(m["session_id"])
+                item = {
+                    "agent_id": m["session_id"],
+                    "agent_type": teammate_name,
+                    "session_id": m["session_id"],
+                    "started_at": started_at,
+                    "cwd": sess.get("cwd", ""),
+                    "team_name": team["name"],
+                    "teammate_name": teammate_name,
+                    "is_teammate": True,
+                    "_tasks": team["tasks"],
+                }
+                vidx = len(visible_agents)
+                visible_agents.append(item)
+                is_sel = (vidx == state.get("selected", -1))
+
+                if is_sel:
+                    try:
+                        stdscr.addnstr(row, 0, " " * (lw - 1), lw - 1, curses.A_REVERSE)
+                    except curses.error:
+                        pass
+                    L(row, base, connector, DIM | curses.A_REVERSE)
+                    L(row, base + 3, "▶", YELLOW | curses.A_REVERSE)
+                    L(row, base + 5, f"{dur:>5}", YELLOW | curses.A_REVERSE)
+                    L(row, base + 11, sid_short, DIM | curses.A_REVERSE)
+                    L(row, base + 18, teammate_name, curses.A_REVERSE | curses.A_BOLD)
+                else:
+                    L(row, base, connector, DIM)
+                    L(row, base + 3, pulse, CYAN)
+                    L(row, base + 5, f"{dur:>5}", YELLOW)
+                    L(row, base + 11, sid_short, DIM)
+                    L(row, base + 18, teammate_name, WHITE)
+                row += 1
+        row += 1
 
     # -- Sessions (tree view, left panel) --
     if active:
@@ -517,7 +703,7 @@ def draw(stdscr, frame: int, state: dict):
         row += 1
 
     # Show idle state when nothing is active
-    if not active and not r_agents:
+    if not active and not r_agents and not teams:
         L(row, 0, " no active sessions or agents", DIM)
         row += 2
 
@@ -576,8 +762,36 @@ def draw(stdscr, frame: int, state: dict):
 
         pr = content_top
 
-        if sel_agent:
-            # Live preview of selected agent
+        if sel_agent and sel_agent.get("is_teammate"):
+            # Task list for selected team member
+            team_name = sel_agent.get("team_name", "")
+            teammate_name = sel_agent.get("teammate_name", "")
+            dur = fmt_dur(sel_agent.get("started_at", ""))
+            sid_short = sel_agent["agent_id"][:7]
+            header = f" {sid_short} · {team_name}/{teammate_name} · {dur}"
+            safe_add(stdscr, pr, rs, header[:rw], w, CYAN | curses.A_BOLD)
+            pr += 1
+            safe_add(stdscr, pr, rs, "─" * (rw - 1), w, DIM)
+            pr += 1
+            tasks_list = sel_agent.get("_tasks", [])
+            sorted_tasks = sorted(
+                tasks_list,
+                key=lambda t: {"in_progress": 0, "pending": 1, "completed": 2}.get(t.get("status", ""), 1),
+            )
+            if not sorted_tasks:
+                safe_add(stdscr, pr, rs, " (no tasks)", w, DIM)
+            else:
+                for t in sorted_tasks:
+                    if pr >= h - 1:
+                        break
+                    status = t.get("status", "")
+                    icon = "✓" if status == "completed" else "●" if status == "in_progress" else "○"
+                    subject = short_prompt(t.get("subject", "?"), rw - 5)
+                    attr = DIM if status == "completed" else WHITE
+                    safe_add(stdscr, pr, rs, f" {icon}  {subject}", w, attr)
+                    pr += 1
+        elif sel_agent:
+            # Live preview of selected subagent
             dur = fmt_dur(sel_agent["started_at"])
             atype = sel_agent.get("agent_type") or "agent"
             aid = sel_agent["agent_id"][:7]
