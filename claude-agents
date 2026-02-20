@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -632,6 +632,44 @@ def main(stdscr):
                 state["status_until"] = time.time() + 3
 
 
+UPDATE_URL = "https://raw.githubusercontent.com/kingsotn-twelve/claude-agents/main/claude-agents"
+
+
+def do_update():
+    import urllib.request
+    import tempfile
+    import shutil
+    target = os.path.realpath(sys.argv[0])
+    print(f"claude-agents v{VERSION} → checking for update...")
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
+            new_src = resp.read()
+    except Exception as e:
+        print(f"error: failed to fetch update: {e}")
+        sys.exit(1)
+    # Extract new version string
+    new_version = VERSION
+    for line in new_src.decode().splitlines():
+        if line.startswith("VERSION ="):
+            new_version = line.split('"')[1]
+            break
+    if new_version == VERSION:
+        print(f"already up to date (v{VERSION})")
+        sys.exit(0)
+    # Write atomically
+    tmp = tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(target))
+    try:
+        tmp.write(new_src)
+        tmp.flush()
+        os.chmod(tmp.name, os.stat(target).st_mode)
+        shutil.move(tmp.name, target)
+    except Exception as e:
+        os.unlink(tmp.name)
+        print(f"error: failed to write update: {e}")
+        sys.exit(1)
+    print(f"updated v{VERSION} → v{new_version}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="claude-agents",
@@ -643,7 +681,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--version", action="version", version=f"claude-agents v{VERSION}"
     )
-    parser.parse_args()
+    parser.add_argument(
+        "--update", action="store_true", help="update to the latest version"
+    )
+    args = parser.parse_args()
+
+    if args.update:
+        do_update()
+        sys.exit(0)
 
     try:
         curses.wrapper(main)

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2 — Feb 19, 2026
+
+### Self-update
+```
+claude-agents --update
+```
+Fetches the latest version from GitHub and replaces the binary in-place. Prints `already up to date` if you're current, or `updated v0.1.1 → v0.1.2` on success.
+
+---
+
 ## v0.1.1 — Feb 19, 2026
 
 ### Fixed: Unknown Agent Pollution
