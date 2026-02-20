@@ -1,0 +1,4 @@
+.worktrees/
+*.db
+*.log
+__pycache__/
