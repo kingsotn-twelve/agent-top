@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -135,6 +135,14 @@ def query_db(db_path: str) -> dict:
         pass
 
     return data
+
+
+def dir_tag(cwd: str) -> str:
+    """Return a short [dirname] prefix from a cwd path."""
+    if not cwd:
+        return ""
+    name = os.path.basename(cwd.rstrip("/")) or os.path.basename(os.path.dirname(cwd))
+    return f"[{name[:10]}]" if name else ""
 
 
 def find_transcript(agent_id: str) -> str:
@@ -400,17 +408,8 @@ def draw(stdscr, frame: int, state: dict):
                 L(row, 17, prompt, DIM)
             else:
                 run_dur = fmt_dur(s["created_at"])
-                dur_attr = GREEN
-                try:
-                    secs = (datetime.utcnow() - datetime.fromisoformat(s["created_at"])).total_seconds()
-                    if secs > 600:
-                        dur_attr = RED
-                    elif secs > 120:
-                        dur_attr = YELLOW
-                except Exception:
-                    pass
                 L(row, 1, pulse, GREEN)
-                L(row, 3, f"{run_dur:>6}", dur_attr)
+                L(row, 3, f"{run_dur:>6}", YELLOW)
                 L(row, 10, sid_short, DIM)
                 L(row, 17, prompt, WHITE)
             row += 1
@@ -425,6 +424,7 @@ def draw(stdscr, frame: int, state: dict):
                     adur = fmt_dur(a["started_at"])
                     atype = a["agent_type"] or "agent"
                     aid = short_id(a["agent_id"])
+                    tag = dir_tag(a.get("cwd", ""))
                     vidx = len(visible_agents)
                     visible_agents.append(a)
                     is_sel = (vidx == state.get("selected", -1))
@@ -437,14 +437,22 @@ def draw(stdscr, frame: int, state: dict):
                         L(row, 3, connector, DIM | curses.A_REVERSE)
                         L(row, 5, "▶", YELLOW | curses.A_REVERSE)
                         L(row, 7, f"{adur:>5}", YELLOW | curses.A_REVERSE)
-                        L(row, 13, atype, curses.A_REVERSE | curses.A_BOLD)
-                        L(row, 13 + len(atype) + 1, aid, curses.A_REVERSE)
+                        col = 13
+                        if tag:
+                            L(row, col, tag, CYAN | curses.A_REVERSE)
+                            col += len(tag) + 1
+                        L(row, col, atype, curses.A_REVERSE | curses.A_BOLD)
+                        L(row, col + len(atype) + 1, aid, curses.A_REVERSE)
                     else:
                         L(row, 3, connector, DIM)
                         L(row, 5, sc, MAGENTA)
                         L(row, 7, f"{adur:>5}", YELLOW)
-                        L(row, 13, atype, MAGENTA)
-                        L(row, 13 + len(atype) + 1, aid, DIM)
+                        col = 13
+                        if tag:
+                            L(row, col, tag, CYAN)
+                            col += len(tag) + 1
+                        L(row, col, atype, MAGENTA)
+                        L(row, col + len(atype) + 1, aid, DIM)
                     row += 1
             elif sid in tool_events:
                 tools = tool_events[sid]
@@ -465,6 +473,7 @@ def draw(stdscr, frame: int, state: dict):
                 break
             dur = fmt_dur(a["started_at"])
             atype = a["agent_type"] or "agent"
+            tag = dir_tag(a.get("cwd", ""))
             vidx = len(visible_agents)
             visible_agents.append(a)
             is_sel = (vidx == state.get("selected", -1))
@@ -476,13 +485,21 @@ def draw(stdscr, frame: int, state: dict):
                     pass
                 L(row, 1, "▶", YELLOW | curses.A_REVERSE)
                 L(row, 3, f"{dur:>6}", YELLOW | curses.A_REVERSE)
-                L(row, 10, atype, curses.A_REVERSE | curses.A_BOLD)
-                L(row, 10 + len(atype) + 1, short_id(a["agent_id"]), curses.A_REVERSE)
+                col = 10
+                if tag:
+                    L(row, col, tag, CYAN | curses.A_REVERSE)
+                    col += len(tag) + 1
+                L(row, col, atype, curses.A_REVERSE | curses.A_BOLD)
+                L(row, col + len(atype) + 1, short_id(a["agent_id"]), curses.A_REVERSE)
             else:
                 L(row, 1, sc, MAGENTA)
                 L(row, 3, f"{dur:>6}", YELLOW)
-                L(row, 10, atype, MAGENTA)
-                L(row, 10 + len(atype) + 1, short_id(a["agent_id"]), DIM)
+                col = 10
+                if tag:
+                    L(row, col, tag, CYAN)
+                    col += len(tag) + 1
+                L(row, col, atype, MAGENTA)
+                L(row, col + len(atype) + 1, short_id(a["agent_id"]), DIM)
             row += 1
         row += 1
 
@@ -632,44 +649,6 @@ def main(stdscr):
                 state["status_until"] = time.time() + 3
 
 
-UPDATE_URL = "https://raw.githubusercontent.com/kingsotn-twelve/claude-agents/main/claude-agents"
-
-
-def do_update():
-    import urllib.request
-    import tempfile
-    import shutil
-    target = os.path.realpath(sys.argv[0])
-    print(f"claude-agents v{VERSION} → checking for update...")
-    try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
-            new_src = resp.read()
-    except Exception as e:
-        print(f"error: failed to fetch update: {e}")
-        sys.exit(1)
-    # Extract new version string
-    new_version = VERSION
-    for line in new_src.decode().splitlines():
-        if line.startswith("VERSION ="):
-            new_version = line.split('"')[1]
-            break
-    if new_version == VERSION:
-        print(f"already up to date (v{VERSION})")
-        sys.exit(0)
-    # Write atomically
-    tmp = tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(target))
-    try:
-        tmp.write(new_src)
-        tmp.flush()
-        os.chmod(tmp.name, os.stat(target).st_mode)
-        shutil.move(tmp.name, target)
-    except Exception as e:
-        os.unlink(tmp.name)
-        print(f"error: failed to write update: {e}")
-        sys.exit(1)
-    print(f"updated v{VERSION} → v{new_version}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="claude-agents",
@@ -681,14 +660,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--version", action="version", version=f"claude-agents v{VERSION}"
     )
-    parser.add_argument(
-        "--update", action="store_true", help="update to the latest version"
-    )
-    args = parser.parse_args()
-
-    if args.update:
-        do_update()
-        sys.exit(0)
+    parser.parse_args()
 
     try:
         curses.wrapper(main)

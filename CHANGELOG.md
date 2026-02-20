@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.0 — Feb 19, 2026
+
+### Directory prefix on agents
+Agents now show a cyan `[dirname]` tag before their type so you can tell at a glance which project they belong to — e.g. `[.claude] Explore` vs `[rodeo] Plan`. Derived from the agent's working directory.
+
+### Cleaner duration display
+Removed green/yellow/red color coding on session durations. All durations now render in a single consistent color.
+
+---
+
 ## v0.1.2 — Feb 19, 2026
 
 ### Self-update
