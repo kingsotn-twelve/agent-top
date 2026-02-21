@@ -18,6 +18,7 @@ interface Creature {
   happiness: number;
   age: number;
   alive: boolean;
+  diedAt: number;
   splitTimer: number;
   state: 'idle' | 'walking' | 'eating' | 'bathing' | 'playing' | 'dying';
   stateTimer: number;
@@ -49,10 +50,10 @@ interface GameState {
 
 // ── CONSTANTS ──────────────────────────────────────────────
 
-const TILE_W = 32;
-const TILE_H = 16;
-const WORLD_W = 20;
-const WORLD_H = 20;
+const TILE_W = 48;
+const TILE_H = 24;
+const WORLD_W = 16;
+const WORLD_H = 16;
 
 const COLORS = {
   grass: ['#2d5a27', '#3a7d32', '#4a9a3c', '#3a7d32'] as const,
@@ -86,7 +87,7 @@ function createCreature(wx: number, wy: number): Creature {
   return {
     x: wx, y: wy, vx: 0, vy: 0,
     hunger: 100, clean: 100, happiness: 100,
-    age: 0, alive: true, splitTimer: 0,
+    age: 0, alive: true, diedAt: 0, splitTimer: 0,
     state: 'idle', stateTimer: 0, animFrame: 0,
     size: 1, bobPhase: Math.random() * Math.PI * 2,
   };
@@ -109,9 +110,14 @@ function screenToWorld(sx: number, sy: number): { x: number; y: number } {
   const cx = sx - state.camera.x;
   const cy = sy - state.camera.y;
   return {
-    x: Math.floor((cx / (TILE_W / 2) + cy / (TILE_H / 2)) / 2),
-    y: Math.floor((cy / (TILE_H / 2) - cx / (TILE_W / 2)) / 2),
+    x: (cx / (TILE_W / 2) + cy / (TILE_H / 2)) / 2,
+    y: (cy / (TILE_H / 2) - cx / (TILE_W / 2)) / 2,
   };
+}
+
+function screenToWorldTile(sx: number, sy: number): { x: number; y: number } {
+  const w = screenToWorld(sx, sy);
+  return { x: Math.floor(w.x), y: Math.floor(w.y) };
 }
 
 // ── DRAWING ────────────────────────────────────────────────
@@ -133,15 +139,28 @@ function drawIsoDiamond(ctx: CanvasRenderingContext2D, sx: number, sy: number, c
 }
 
 function drawTree(ctx: CanvasRenderingContext2D, sx: number, sy: number, tree: Tree): void {
-  drawPixelRect(ctx, sx - 2, sy - 16, 4, 12, COLORS.treeTrunk);
+  // Trunk
+  drawPixelRect(ctx, sx - 3, sy - 28, 6, 20, COLORS.treeTrunk);
+  // Canopy
   const leafColor = tree.health > 0 ? COLORS.treeLeaf : '#555';
   ctx.fillStyle = leafColor;
   ctx.beginPath();
-  ctx.arc(sx, sy - 20, 8, 0, Math.PI * 2);
+  ctx.arc(sx, sy - 34, 14, 0, Math.PI * 2);
   ctx.fill();
+  // Darker leaf layer for depth
+  ctx.fillStyle = '#1a6e1f';
+  ctx.beginPath();
+  ctx.arc(sx + 3, sy - 30, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = leafColor;
+  ctx.beginPath();
+  ctx.arc(sx - 2, sy - 36, 11, 0, Math.PI * 2);
+  ctx.fill();
+  // Apples
   if (tree.type === 'apple' && tree.health > 0) {
-    drawPixelRect(ctx, sx - 4, sy - 22, 3, 3, COLORS.food);
-    drawPixelRect(ctx, sx + 2, sy - 18, 3, 3, COLORS.food);
+    drawPixelRect(ctx, sx - 6, sy - 38, 4, 4, COLORS.food);
+    drawPixelRect(ctx, sx + 4, sy - 32, 4, 4, COLORS.food);
+    drawPixelRect(ctx, sx - 1, sy - 28, 4, 4, COLORS.food);
   }
 }
 
@@ -158,7 +177,7 @@ function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, cre
     bodyColor = creature.happiness > 70 ? COLORS.creatureHappy : COLORS.creature;
   }
 
-  const s = 8 + Math.min(creature.age / 100, 4);
+  const s = 12 + Math.min(creature.age / 200, 4);
 
   // Body
   ctx.fillStyle = bodyColor;
@@ -197,14 +216,15 @@ function updateCreature(c: Creature, dt: number): void {
   if (!c.alive) return;
 
   c.age += dt;
-  c.hunger = Math.max(0, c.hunger - dt * 0.5);
-  c.clean = Math.max(0, c.clean - dt * 0.3);
-  c.happiness = Math.max(0, c.happiness - dt * 0.2);
+  c.hunger = Math.max(0, c.hunger - dt * 0.03);
+  c.clean = Math.max(0, c.clean - dt * 0.02);
+  c.happiness = Math.max(0, c.happiness - dt * 0.015);
   c.bobPhase += dt * 0.1;
   c.stateTimer -= dt;
 
   if (c.hunger <= 0) {
     c.alive = false;
+    c.diedAt = state.tick;
     c.state = 'dying';
     return;
   }
@@ -216,7 +236,7 @@ function updateCreature(c: Creature, dt: number): void {
   // Split when happy enough for long enough
   if (c.happiness > 70 && c.hunger > 50 && c.clean > 50) {
     c.splitTimer += dt;
-    if (c.splitTimer > 300) {
+    if (c.splitTimer > 500) {
       c.splitTimer = 0;
       const newC = createCreature(
         c.x + (Math.random() - 0.5) * 3,
@@ -338,9 +358,9 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
   state.creatures.filter(c => !c.alive).forEach(c => {
     const { x: sx, y: sy } = worldToScreen(c.x, c.y);
     ctx.fillStyle = COLORS.creatureDead;
-    ctx.globalAlpha = Math.max(0, 1 - (tick - c.age) / 200);
+    ctx.globalAlpha = Math.max(0, 1 - (tick - c.diedAt) / 300);
     ctx.beginPath();
-    ctx.arc(sx, sy - 4, 3, 0, Math.PI * 2);
+    ctx.arc(sx, sy - 4, 5, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   });
@@ -389,7 +409,7 @@ function setupInput(canvas: HTMLCanvasElement): void {
       x: (e.clientX - rect.left) * scaleX,
       y: (e.clientY - rect.top) * scaleY,
     };
-    state.mouseWorld = screenToWorld(state.mouseScreen.x, state.mouseScreen.y);
+    state.mouseWorld = screenToWorldTile(state.mouseScreen.x, state.mouseScreen.y);
   });
 
   canvas.addEventListener('click', (e: MouseEvent) => {
@@ -398,15 +418,16 @@ function setupInput(canvas: HTMLCanvasElement): void {
     const scaleY = canvas.height / rect.height;
     const sx = (e.clientX - rect.left) * scaleX;
     const sy = (e.clientY - rect.top) * scaleY;
+    // Use fractional world coords for accurate creature click detection
     const { x: wx, y: wy } = screenToWorld(sx, sy);
 
-    // Find nearest alive creature
+    // Find nearest alive creature within 2.5 world units
     let nearest: Creature | null = null;
     let nearestDist = Infinity;
     for (const c of state.creatures) {
       if (!c.alive) continue;
       const dist = (c.x - wx) ** 2 + (c.y - wy) ** 2;
-      if (dist < nearestDist && dist < 4) {
+      if (dist < nearestDist && dist < 6.25) {
         nearest = c;
         nearestDist = dist;
       }
@@ -426,7 +447,7 @@ function setupInput(canvas: HTMLCanvasElement): void {
       for (const t of state.trees) {
         if (t.health <= 0) continue;
         const dist = (t.x - wx) ** 2 + (t.y - wy) ** 2;
-        if (dist < nearestTreeDist && dist < 4) {
+        if (dist < nearestTreeDist && dist < 6.25) {
           nearestTree = t;
           nearestTreeDist = dist;
         }
@@ -470,7 +491,7 @@ function main(): void {
       }
 
       state.creatures = state.creatures.filter(c =>
-        c.alive || (state.tick - c.age) < 500
+        c.alive || (state.tick - c.diedAt) < 300
       );
 
       render(ctx, canvas, state.tick);
