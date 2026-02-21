@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "0.8.1"
+VERSION = "0.8.0"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -255,8 +255,9 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
                 for row in conn.execute(
                     """SELECT tool_name, tool_label, created_at FROM tool_event
                        WHERE session_id = ?
+                         AND created_at > datetime('now', '-30 minutes')
                        ORDER BY created_at DESC
-                       LIMIT 30""",
+                       LIMIT 20""",
                     (sid,),
                 ):
                     rows.append(dict(row))
@@ -406,67 +407,6 @@ def query_teams(db_path: str, active_session_ids: set[str]) -> dict:
             team["members"] = active_members
             result["teams"].append(team)
 
-    return result
-
-
-# ── SESSION HISTORY (from JSONL transcripts) ────────────────
-
-CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
-
-
-def find_session_jsonl(session_id: str, cwd: str = "") -> str:
-    """Find the JSONL transcript file for a session ID."""
-    if not session_id:
-        return ""
-    # Try project dir based on cwd
-    if cwd:
-        proj_name = "-" + cwd.lstrip("/").replace("/", "-")
-        path = os.path.join(CLAUDE_PROJECTS, proj_name, f"{session_id}.jsonl")
-        if os.path.exists(path):
-            return path
-    # Search all project dirs
-    try:
-        for proj in os.listdir(CLAUDE_PROJECTS):
-            path = os.path.join(CLAUDE_PROJECTS, proj, f"{session_id}.jsonl")
-            if os.path.exists(path):
-                return path
-    except Exception:
-        pass
-    return ""
-
-
-def read_session_history(session_id: str, cwd: str = "") -> dict:
-    """Read conversation history from JSONL. Returns {messages, model, tokens}."""
-    result = {"messages": [], "model": "", "total_input": 0, "total_output": 0}
-    path = find_session_jsonl(session_id, cwd)
-    if not path:
-        return result
-    try:
-        with open(path, "r", errors="replace") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    etype = e.get("type", "")
-                    if etype == "user":
-                        content = e.get("message", {}).get("content", "")
-                        if isinstance(content, list):
-                            text = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
-                        else:
-                            text = str(content)
-                        text = text.strip()
-                        if text and not text.startswith("<"):
-                            result["messages"].append({"role": "user", "text": text, "ts": e.get("timestamp", "")})
-                    elif etype == "assistant":
-                        msg = e.get("message", {})
-                        if not result["model"] and msg.get("model"):
-                            result["model"] = msg["model"]
-                        usage = msg.get("usage", {})
-                        result["total_input"] += usage.get("input_tokens", 0)
-                        result["total_output"] += usage.get("output_tokens", 0)
-                except Exception:
-                    pass
-    except Exception:
-        pass
     return result
 
 
@@ -778,21 +718,9 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     session_tools = cache.get("session_tools", {})
     rw = x + w  # absolute right edge
 
-    # Scope to selected session
-    vis = state.get("visible_items", [])
-    sel = state.get("selected", -1)
-    sel_item = vis[sel] if 0 <= sel < len(vis) else None
-    target_sid = sel_item.get("session_id", "") if sel_item else ""
-    if not target_sid and active_all:
-        target_sid = active_all[0]["session_id"]
-    scoped = [s for s in active_all if s["session_id"] == target_sid]
-    if not scoped:
-        safe_add(stdscr, y + 1, x + 2, "select a session", rw, DIM)
-        return
-
-    # Build tree: session -> agents -> tools
+    # Build tree: sessions -> agents -> tools
     pr = y
-    for s in scoped:
+    for s in active_all:
         if pr >= y + h:
             break
         sid = s["session_id"]
@@ -1100,7 +1028,15 @@ def _detail_content_height(sel_agent, pw, cache):
     if not sel_agent:
         return 3
     if sel_agent.get("is_session"):
-        return 3 + 12  # header + tokens + divider + agents + tools (estimate)
+        rows = 2  # header + divider
+        prompt = (sel_agent.get("prompt", "") or "").replace("\n", " ").strip()
+        if prompt:
+            rows += 1  # prompt line
+        sid = sel_agent.get("session_id", "")
+        n_tools = len(cache.get("session_tools", {}).get(sid, []))
+        if n_tools:
+            rows += 1 + n_tools  # blank + tool lines
+        return rows
     if sel_agent.get("is_teammate"):
         tasks = sel_agent.get("_tasks", [])
         return 2 + (1 if not tasks else 2 + len(tasks))  # header + divider + progress + blank + tasks
@@ -1124,84 +1060,30 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
     max_row_virtual = max_row + scroll
 
     if sel_agent and sel_agent.get("is_session"):
-        # Session detail: header + agents + tools
+        # Rich session detail
         sid = sel_agent["session_id"]
         dur = fmt_dur(sel_agent.get("started_at", ""))
         sid_short = sid[:7]
         cwd = sel_agent.get("cwd", "")
+        prompt_text = sel_agent.get("prompt", "")
         tag = dir_tag(cwd)
-
-        # Header with model + tokens from JSONL
-        hist_cache = cache.setdefault("_hist_cache", {})
-        if hist_cache.get("sid") != sid:
-            hist_cache["sid"] = sid
-            hist_cache["data"] = read_session_history(sid, cwd)
-        hist = hist_cache["data"]
-        model = hist.get("model", "")
-        model_short = model.replace("claude-", "").replace("-", " ") if model else ""
-        tok_in = hist.get("total_input", 0)
-        tok_out = hist.get("total_output", 0)
-        tok_str = f"{tok_in // 1000}k in \u00b7 {tok_out // 1000}k out" if tok_in else ""
-        header = f"{sid_short} \u00b7 {tag}" if tag else sid_short
-        if model_short:
-            header += f" \u00b7 {model_short}"
-        header += f" \u00b7 {dur}"
+        header = f"{sid_short} \u00b7 {tag} session \u00b7 {dur}" if tag else f"{sid_short} \u00b7 session \u00b7 {dur}"
         P(pr, col, header[:pw], GREEN | curses.A_BOLD)
         pr += 1
-        if tok_str:
-            P(pr, col, tok_str, DIM)
-            pr += 1
         P(pr, col, SYMBOLS["h"] * pw, DIM)
         pr += 1
 
-        # Child agents (running + completed, query on-demand)
-        r_agents_list = cache.get("r_agents", [])
-        c_agents_list = cache.get("c_agents", [])
-        child_running = [a for a in r_agents_list if a["session_id"] == sid]
-        child_done = [a for a in c_agents_list if a["session_id"] == sid]
-        if not child_done:
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row
-                child_done = [dict(r) for r in conn.execute(
-                    "SELECT agent_id, agent_type, session_id, started_at, stopped_at FROM agent WHERE session_id = ? AND stopped_at IS NOT NULL ORDER BY started_at DESC LIMIT 10",
-                    (sid,)).fetchall()]
-                conn.close()
-            except Exception:
-                pass
-        all_children = child_running + child_done[:10]
-        if all_children and pr < max_row_virtual:
-            P(pr, col, f"AGENTS  {len(all_children)}", CYAN)
-            pr += 1
-            for a in all_children:
-                if pr >= max_row_virtual:
-                    break
-                adur = fmt_dur(a["started_at"], a.get("stopped_at"))
-                atype = a["agent_type"] or "agent"
-                aid = short_id(a["agent_id"])
-                running = a in child_running
-                icon = "\u25cf" if running else "\u25cb"
-                color = MAGENTA if running else DIM
-                P(pr, col, f"{icon} {adur:>5}  {atype}  {aid}", color)
-                pr += 1
+        # Prompt
+        if prompt_text and pr < max_row_virtual:
+            display_prompt = prompt_text.replace("\n", " ").strip()
+            if display_prompt.startswith("<"):
+                display_prompt = "(system prompt)"
+            P(pr, col, display_prompt[:pw], WHITE)
             pr += 1
 
-        # Tool event timeline (query on-demand if not cached)
+        # Tool event timeline
         session_tools = cache.get("session_tools", {}).get(sid, [])
-        if not session_tools:
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row
-                session_tools = [dict(r) for r in conn.execute(
-                    "SELECT tool_name, tool_label, created_at FROM tool_event WHERE session_id = ? ORDER BY created_at DESC LIMIT 30",
-                    (sid,)).fetchall()]
-                session_tools.reverse()
-                conn.close()
-                cache.setdefault("session_tools", {})[sid] = session_tools
-            except Exception:
-                pass
         if session_tools and pr < max_row_virtual:
-            P(pr, col, f"TOOLS  {len(session_tools)}", CYAN)
             pr += 1
             for ev in session_tools:
                 if pr >= max_row_virtual:
