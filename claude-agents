@@ -60,8 +60,8 @@ TOOL_NAMES = {
     "Skill": "Run skill",
 }
 
-VIZ_MODES = ["gantt", "tree", "graph"]
-VIZ_LABELS = {"gantt": "TIMELINE", "tree": "TREE", "graph": "GRAPH"}
+VIZ_MODES = ["tree", "gantt"]
+VIZ_LABELS = {"tree": "TREE", "gantt": "TIMELINE"}
 
 
 def friendly_tool(name: str, label: str = "") -> str:
@@ -710,7 +710,7 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
 
 
 def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
-    """Hierarchical Tree: session execution tree with colored nodes."""
+    """Hierarchical Tree: selected session's execution tree with colored nodes."""
     active_all = cache.get("active_all", [])
     r_agents = cache.get("r_agents", [])
     c_agents = cache.get("c_agents", [])
@@ -718,58 +718,73 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     session_tools = cache.get("session_tools", {})
     rw = x + w  # absolute right edge
 
-    # Build tree: sessions -> agents -> tools
+    # Scope to selected session
+    vis = state.get("visible_items", [])
+    sel = state.get("selected", -1)
+    sel_item = vis[sel] if 0 <= sel < len(vis) else None
+    target_sid = sel_item.get("session_id", "") if sel_item else ""
+    if not target_sid and active_all:
+        target_sid = active_all[0]["session_id"]
+
+    sess = next((s for s in active_all if s["session_id"] == target_sid), None)
+    if not sess:
+        safe_add(stdscr, y + 1, x + 2, "select a session", rw, DIM)
+        return
+
     pr = y
-    for s in active_all:
+    sid = sess["session_id"]
+    prompt = short_prompt(sess.get("prompt", ""), w - 10)
+    dur = fmt_dur(sess["created_at"])
+    safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", rw, GREEN)
+    pr += 1
+
+    # Child agents for THIS session
+    children = [a for a in r_agents if a["session_id"] == sid]
+    completed = [a for a in c_agents if a["session_id"] == sid][:5]
+    all_children = children + completed
+    for i, a in enumerate(all_children):
         if pr >= y + h:
             break
-        sid = s["session_id"]
-        prompt = short_prompt(s.get("prompt", ""), w - 10)
-        dur = fmt_dur(s["created_at"])
-        safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", rw, GREEN)
+        is_last = (i == len(all_children) - 1)
+        connector = "\u2514\u2500" if is_last else "\u251c\u2500"
+        atype = a["agent_type"] or "agent"
+        adur = fmt_dur(a["started_at"], a.get("stopped_at"))
+        running = a in children
+        color = MAGENTA if running else DIM
+        safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {adur}", rw, color)
         pr += 1
 
-        # Child agents
-        children = [a for a in r_agents if a["session_id"] == sid]
-        completed = [a for a in c_agents if a["session_id"] == sid][:3]
-        all_children = children + completed
-        for i, a in enumerate(all_children):
+        # Tools: query by agent's time window from session_tools
+        s_tools = session_tools.get(sid, [])
+        a_start = a["started_at"]
+        a_end = a.get("stopped_at") or "9999-12-31"
+        agent_tools = [t for t in s_tools if a_start <= t.get("created_at", "") <= a_end][:5]
+        for j, t in enumerate(agent_tools):
             if pr >= y + h:
                 break
-            is_last = (i == len(all_children) - 1)
-            connector = "\u2514\u2500" if is_last else "\u251c\u2500"
-            atype = a["agent_type"] or "agent"
-            dur = fmt_dur(a["started_at"], a.get("stopped_at"))
-            running = a in children
-            color = MAGENTA if running else DIM
-            safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {dur}", rw, color)
+            tconn = " " if is_last else "\u2502"
+            tlast = "\u2514" if j == len(agent_tools) - 1 else "\u251c"
+            desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+            safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", rw, YELLOW)
             pr += 1
 
-            # Tools for this agent (from session_tools if available)
-            agent_tools = session_tools.get(a.get("session_id", ""), [])[:3]
-            for j, t in enumerate(agent_tools):
-                if pr >= y + h:
-                    break
-                tconn = " " if is_last else "\u2502"
-                tlast = "\u2514" if j == len(agent_tools) - 1 else "\u251c"
-                desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-                safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", rw, YELLOW)
-                pr += 1
-
-        # Direct tools (no agent) for this session
-        if not all_children and sid in tool_events:
-            for t in tool_events[sid]:
-                if pr >= y + h:
-                    break
-                desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-                safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", rw, YELLOW)
-                pr += 1
-        if pr < y + h:
-            pr += 1  # gap between sessions
+    # Direct tools (no agent) for this session
+    if not all_children:
+        tools = tool_events.get(sid, []) or session_tools.get(sid, [])[:5]
+        for t in tools:
+            if pr >= y + h:
+                break
+            desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+            safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", rw, YELLOW)
+            pr += 1
 
 
-def _draw_viz_graph(stdscr, y, x, h, w, cache, state, frame):
-    """Flow Graph: layered DAG showing prompt → agents → tools → next prompt convergence."""
+def _draw_viz_graph_removed():
+    """Removed — was flow graph. Kept as placeholder to avoid index issues."""
+    pass
+
+
+def _unused_graph():
     active_all = cache.get("active_all", [])
     rw_abs = x + w - 1
 
@@ -1898,25 +1913,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     if split and rw > 10:
         total_rh = h - content_top - 1
         focused = state.get("focus") == "right"
-        viz_mode = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else "life"
-        graph_hovered = focused and viz_mode == "graph" and state.get("graph_nodes")
-
-        if graph_hovered:
-            # Show hovered graph node info in DETAIL
-            gn = state["graph_nodes"]
-            gh = state.get("graph_hover", 0)
-            hovered = gn[gh] if 0 <= gh < len(gn) else None
-            if hovered:
-                detail_h = 4  # compact: box + type + detail
-                draw_box(stdscr, content_top, rx, detail_h, rw, title="\u25b6 DETAIL",
-                         border_attr=CYAN)
-                type_colors = {"prompt": GREEN, "agent": MAGENTA, "tool": YELLOW}
-                color = type_colors.get(hovered["type"], DIM)
-                safe_add(stdscr, content_top + 1, rx + 2, f"{hovered['type']}: {hovered['label']}", rx + rw - 1, color)
-                safe_add(stdscr, content_top + 2, rx + 2, hovered.get("detail", "")[:rw - 4], rx + rw - 1, DIM)
-            else:
-                detail_h = 0
-        elif sel_agent:
+        if sel_agent:
             content_rows = _detail_content_height(sel_agent, rw - 4, cache)
             detail_h = min(content_rows + 2, total_rh - 4)
             title_str = "\u25b6 DETAIL" if focused else "DETAIL"
@@ -1942,12 +1939,10 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 tabs += "  LIFE"
             draw_box(stdscr, viz_y, rx, viz_rh, rw, title=f"TAB  {tabs}")
 
-            if viz_mode == "gantt":
-                _draw_viz_gantt(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state)
-            elif viz_mode == "tree":
+            if viz_mode == "tree":
                 _draw_viz_tree(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state)
-            elif viz_mode == "graph":
-                _draw_viz_graph(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state, frame)
+            elif viz_mode == "gantt":
+                _draw_viz_gantt(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state)
 
         # -- Game of Life (if enabled, after viz modes via extra Tab) --
         if state.get("game_of_life") and state.get("viz_mode", 0) >= len(VIZ_MODES) and viz_rh >= 4:
