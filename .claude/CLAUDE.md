@@ -1,5 +1,21 @@
 # claude-agents repo instructions
 
+## Design Mission
+
+The dashboard is a living thing. Not a monitoring tool — a presence.
+
+**Aesthetic DNA**: Severance (Lumon MDR's cold void, data floating in darkness), Black Mirror: Bandersnatch (ZX Spectrum palette, hard-cut transitions, character-by-character text), Black Mirror: Plaything (care-taking creates obligation, visible neglect, the Tamagotchi effect), Sigil/Conway (real stakes, agents that live and die, genuine fragility).
+
+**Core rules**:
+- Real vitality, not fake animation — every visual effect driven by real telemetry
+- Constraint creates trust — fewer capabilities, more confidence in each one
+- Simple verbs, deep weight — the simpler the interaction, the more emotional bandwidth
+- Alive through subtlety — breathing borders, heartbeat cursor, one-frame flickers. Subliminal.
+- Care-taking as the core verb — you tend to agents, not monitor them
+- Hard cuts, not smooth transitions — state changes snap instantly
+
+See `docs/plans/2026-02-20-alive-console-design.md` for the full design document.
+
 ## Changelog style
 Modeled after [cursor.com/changelog](https://cursor.com/changelog).
 
