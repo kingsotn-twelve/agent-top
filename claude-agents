@@ -255,9 +255,8 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
                 for row in conn.execute(
                     """SELECT tool_name, tool_label, created_at FROM tool_event
                        WHERE session_id = ?
-                         AND created_at > datetime('now', '-30 minutes')
                        ORDER BY created_at DESC
-                       LIMIT 20""",
+                       LIMIT 30""",
                     (sid,),
                 ):
                     rows.append(dict(row))
@@ -1166,47 +1165,23 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
         P(pr, col, SYMBOLS["h"] * pw, DIM)
         pr += 1
 
-        # Conversation messages from JSONL
-        messages = hist.get("messages", [])
-        if messages:
-            for msg in messages:
-                if pr >= max_row_virtual:
-                    break
-                text = msg["text"].replace("\n", " ")[:pw]
-                P(pr, col, text, WHITE)
-                pr += 1
-        else:
-            prompt_text = sel_agent.get("prompt", "")
-            if prompt_text and pr < max_row_virtual:
-                display_prompt = prompt_text.replace("\n", " ").strip()
-                if display_prompt.startswith("<"):
-                    display_prompt = "(system prompt)"
-                P(pr, col, display_prompt[:pw], WHITE)
-                pr += 1
-
-        # Tool event timeline
-        session_tools = cache.get("session_tools", {}).get(sid, [])
-        if session_tools and pr < max_row_virtual:
-            pr += 1
-            P(pr, col, f"TOOLS  {len(session_tools)} recent", CYAN)
-            pr += 1
-            for ev in session_tools:
-                if pr >= max_row_virtual:
-                    break
-                ts = fmt_time(ev.get("created_at"))
-                tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
-                P(pr, col, ts, DIM)
-                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
-                pr += 1
-
-        # Child agents
+        # Child agents (running + completed, query on-demand)
         r_agents_list = cache.get("r_agents", [])
         c_agents_list = cache.get("c_agents", [])
         child_running = [a for a in r_agents_list if a["session_id"] == sid]
-        child_done = [a for a in c_agents_list if a["session_id"] == sid][:5]
-        all_children = child_running + child_done
+        child_done = [a for a in c_agents_list if a["session_id"] == sid]
+        if not child_done:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                child_done = [dict(r) for r in conn.execute(
+                    "SELECT agent_id, agent_type, session_id, started_at, stopped_at FROM agent WHERE session_id = ? AND stopped_at IS NOT NULL ORDER BY started_at DESC LIMIT 10",
+                    (sid,)).fetchall()]
+                conn.close()
+            except Exception:
+                pass
+        all_children = child_running + child_done[:10]
         if all_children and pr < max_row_virtual:
-            pr += 1
             P(pr, col, f"AGENTS  {len(all_children)}", CYAN)
             pr += 1
             for a in all_children:
@@ -1219,6 +1194,46 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 icon = "\u25cf" if running else "\u25cb"
                 color = MAGENTA if running else DIM
                 P(pr, col, f"{icon} {adur:>5}  {atype}  {aid}", color)
+                pr += 1
+            pr += 1
+
+        # Tool event timeline (query on-demand if not cached)
+        session_tools = cache.get("session_tools", {}).get(sid, [])
+        if not session_tools:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                session_tools = [dict(r) for r in conn.execute(
+                    "SELECT tool_name, tool_label, created_at FROM tool_event WHERE session_id = ? ORDER BY created_at DESC LIMIT 30",
+                    (sid,)).fetchall()]
+                session_tools.reverse()
+                conn.close()
+                cache.setdefault("session_tools", {})[sid] = session_tools
+            except Exception:
+                pass
+        if session_tools and pr < max_row_virtual:
+            P(pr, col, f"TOOLS  {len(session_tools)}", CYAN)
+            pr += 1
+            for ev in session_tools:
+                if pr >= max_row_virtual:
+                    break
+                ts = fmt_time(ev.get("created_at"))
+                tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
+                P(pr, col, ts, DIM)
+                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
+                pr += 1
+            pr += 1
+
+        # Conversation messages from JSONL
+        messages = hist.get("messages", [])
+        if messages and pr < max_row_virtual:
+            P(pr, col, f"MESSAGES  {len(messages)}", CYAN)
+            pr += 1
+            for msg in messages:
+                if pr >= max_row_virtual:
+                    break
+                text = msg["text"].replace("\n", " ")[:pw]
+                P(pr, col, text, WHITE)
                 pr += 1
 
     elif sel_agent and sel_agent.get("is_teammate"):
