@@ -80,7 +80,16 @@ def init_colors():
 
 # ── DATA QUERIES ─────────────────────────────────────────────
 
-def query_db(db_path: str) -> dict:
+STATS_RANGES = [
+    ("1h", "-1 hours"),
+    ("1d", "-1 days"),
+    ("7d", "-7 days"),
+    ("30d", "-30 days"),
+    ("all", None),
+]
+
+
+def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
     data = {
         "active_sessions": [],
         "running_agents": [],
@@ -213,12 +222,19 @@ def query_db(db_path: str) -> dict:
             except Exception:
                 pass
 
-        # Usage stats: top agent types + top tools (last 7 days)
+        # Usage stats: top agent types + top tools
+        _, sql_interval = STATS_RANGES[stats_range_idx]
+        if sql_interval:
+            agent_where = f"WHERE started_at > datetime('now', '{sql_interval}') AND agent_type != ''"
+            tool_where = f"WHERE te.created_at > datetime('now', '{sql_interval}')"
+        else:
+            agent_where = "WHERE agent_type != ''"
+            tool_where = ""
         try:
             data["top_agents"] = [
                 dict(r) for r in conn.execute(
-                    """SELECT agent_type, cwd, COUNT(*) as cnt FROM agent
-                       WHERE started_at > datetime('now', '-7 days') AND agent_type != ''
+                    f"""SELECT agent_type, cwd, COUNT(*) as cnt FROM agent
+                       {agent_where}
                        GROUP BY agent_type, cwd ORDER BY cnt DESC LIMIT 12"""
                 )
             ]
@@ -227,10 +243,10 @@ def query_db(db_path: str) -> dict:
         try:
             data["top_tools"] = [
                 dict(r) for r in conn.execute(
-                    """SELECT te.tool_name, p.cwd, COUNT(*) as cnt
+                    f"""SELECT te.tool_name, p.cwd, COUNT(*) as cnt
                        FROM tool_event te
                        LEFT JOIN prompt p ON te.session_id = p.session_id
-                       WHERE te.created_at > datetime('now', '-7 days')
+                       {tool_where}
                        GROUP BY te.tool_name, p.cwd ORDER BY cnt DESC LIMIT 12"""
                 )
             ]
@@ -592,9 +608,9 @@ def draw_box(stdscr, y, x, h, w, title="", title_attr=0, border_attr=0):
 
 # ── MAIN DRAW + LOOP ────────────────────────────────────────
 
-def refresh_data(cache: dict) -> dict:
+def refresh_data(cache: dict, stats_range_idx: int = 2) -> dict:
     """Refresh cached dashboard data from DB + filesystem."""
-    data = query_db(DB_PATH)
+    data = query_db(DB_PATH, stats_range_idx)
     active_all = data["active_sessions"]
     active_sids_all = {s["session_id"] for s in active_all}
     team_data = query_teams(DB_PATH, active_sids_all)
@@ -1226,7 +1242,12 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     # -- STATS panel (bottom-left, below history) --
     cr_stats = cr + hist_h
     if stats_lh >= 4:
-        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title="STATS")
+        range_label, _ = STATS_RANGES[state.get("stats_range", 2)]
+        range_tabs = "  ".join(
+            f"[{r[0]}]" if i == state.get("stats_range", 2) else r[0]
+            for i, r in enumerate(STATS_RANGES)
+        )
+        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title=f"STATS  {range_tabs}")
         sr = cr_stats + 1
         max_sr = cr_stats + stats_lh - 1
 
@@ -1255,7 +1276,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
         # Agent rankings (7d)
         if top_agents and sr < max_sr - 1:
-            L(sr, 2, "AGENTS  7d", CYAN)
+            L(sr, 2, f"AGENTS  {range_label}", CYAN)
             sr += 1
             max_a = top_agents[0]["cnt"]
             tag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_agents), default=0)
@@ -1275,7 +1296,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
         # Tool rankings (7d)
         if top_tools and sr < max_sr - 1:
-            L(sr, 2, "TOOLS   7d", CYAN)
+            L(sr, 2, f"TOOLS   {range_label}", CYAN)
             sr += 1
             max_t = top_tools[0]["cnt"]
             ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
@@ -1314,7 +1335,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         # -- LIFE panel (below detail, or full right panel) --
         life_y = content_top + detail_h
         life_rh = total_rh - detail_h
-        if life_rh >= 4 and active_all:
+        if state.get("game_of_life") and life_rh >= 4 and active_all:
             life_sid = None
             if sel_agent and sel_agent.get("is_session"):
                 life_sid = sel_agent["session_id"]
@@ -1371,7 +1392,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     if status and time.time() < state.get("status_until", 0):
         safe_add(stdscr, h - 1, 0, f" {status}", w, YELLOW)
     elif visible_items:
-        safe_add(stdscr, h - 1, 0, " j/k=select  esc=deselect  enter=open  q=quit", w, DIM)
+        safe_add(stdscr, h - 1, 0, " j/k=select  h/l=stats range  esc=deselect  enter=open  q=quit", w, DIM)
     else:
         safe_add(stdscr, h - 1, 0, " q=quit", w, DIM)
     stdscr.refresh()
@@ -1381,7 +1402,7 @@ RENDER_MS = 100     # redraw interval (smooth animations)
 DATA_FRAMES = 20    # refresh DB every N frames (~2s at 100ms)
 
 
-def main(stdscr):
+def main(stdscr, game_of_life=False):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(RENDER_MS)
@@ -1389,13 +1410,13 @@ def main(stdscr):
 
     init_colors()
 
-    state: dict = {"selected": -1, "visible_items": [], "status_msg": "", "status_until": 0.0}
+    state: dict = {"selected": -1, "visible_items": [], "status_msg": "", "status_until": 0.0, "stats_range": 2, "game_of_life": game_of_life}
     cache: dict = {}
-    refresh_data(cache)
+    refresh_data(cache, state["stats_range"])
     frame = 0
     while True:
         if frame % DATA_FRAMES == 0:
-            refresh_data(cache)
+            refresh_data(cache, state["stats_range"])
         draw(stdscr, frame, state, cache)
         frame += 1
         ch = stdscr.getch()
@@ -1410,6 +1431,16 @@ def main(stdscr):
         elif ch in (ord("k"), curses.KEY_UP):
             if state["selected"] > 0:
                 state["selected"] -= 1
+        elif ch in (ord("l"), curses.KEY_RIGHT):
+            old = state["stats_range"]
+            state["stats_range"] = min(old + 1, len(STATS_RANGES) - 1)
+            if state["stats_range"] != old:
+                refresh_data(cache, state["stats_range"])
+        elif ch in (ord("h"), curses.KEY_LEFT):
+            old = state["stats_range"]
+            state["stats_range"] = max(old - 1, 0)
+            if state["stats_range"] != old:
+                refresh_data(cache, state["stats_range"])
         elif ch in (10, 13, curses.KEY_ENTER):
             idx = state["selected"]
             agents = state["visible_items"]
@@ -1473,6 +1504,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--update", action="store_true", help="self-update from GitHub"
     )
+    parser.add_argument(
+        "--game-of-life", action="store_true", help="show Conway's Game of Life"
+    )
     args = parser.parse_args()
 
     if args.update:
@@ -1480,6 +1514,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     try:
-        curses.wrapper(main)
+        curses.wrapper(lambda stdscr: main(stdscr, game_of_life=args.game_of_life))
     except KeyboardInterrupt:
         pass
