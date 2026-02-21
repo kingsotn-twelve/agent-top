@@ -84,6 +84,17 @@ body {
   border-radius: 2px;
 }
 
+/* Player profile — dim italic label below resource counters */
+#player-profile {
+  font-size: 7px !important;
+  color: rgba(180, 150, 200, 0.6) !important;
+  border-color: rgba(83, 52, 131, 0.4) !important;
+  background: rgba(10, 8, 20, 0.7) !important;
+  font-style: italic;
+  min-width: 140px;
+  text-align: center;
+}
+
 /* CRT scanline overlay */
 body::after {
   content: '';

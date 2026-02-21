@@ -9,15 +9,17 @@
 <body>
   <canvas id="game" width="800" height="600"></canvas>
   <div id="toolbar">
-    <button id="tool-feed" class="tool active" data-tool="feed">🍎 Feed</button>
-    <button id="tool-clean" class="tool" data-tool="clean">🧽 Clean</button>
-    <button id="tool-play" class="tool" data-tool="play">🎠 Play</button>
-    <button id="tool-chop" class="tool" data-tool="chop">🪓 Chop</button>
+    <button id="tool-feed" class="tool active" data-tool="feed">Feed</button>
+    <button id="tool-clean" class="tool" data-tool="clean">Clean</button>
+    <button id="tool-play" class="tool" data-tool="play">Play</button>
+    <button id="tool-chop" class="tool" data-tool="chop">Chop</button>
   </div>
   <div id="hud">
     <span id="population">Pop: 0</span>
     <span id="wood">Wood: 0</span>
     <span id="gems">Gems: 0</span>
+    <span id="bones">Bones: 0</span>
+    <span id="player-profile" class="player-profile"></span>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

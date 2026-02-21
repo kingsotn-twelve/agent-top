@@ -4,6 +4,8 @@
  * Isometric world with yellow fuzzy creatures that need feeding, cleaning,
  * and playing with. They multiply when happy. They die when neglected.
  * The population grows exponentially. You can't keep up. That's the point.
+ *
+ * v2: Self-evolving behavior, player profiling, bone harvesting, world events.
  */
 
 // ── TYPES ──────────────────────────────────────────────────
@@ -32,6 +34,11 @@ interface Creature {
   visualEffectTimer?: number;
   // food-seeking
   targetFood?: FoodItem | null;
+  // Self-evolving behavior (Feature 1)
+  behaviorCode?: string;
+  behaviorFn?: Function;
+  playerProfile?: string[];
+  evolutionGeneration?: number;
 }
 
 interface FoodItem {
@@ -53,13 +60,21 @@ interface Tree {
   regrowTimer: number;
 }
 
+// Feature 3: Bone harvesting
+interface Bone {
+  x: number;
+  y: number;
+  age: number;
+}
+
 type ToolType = 'feed' | 'clean' | 'play' | 'chop';
 
 interface GameState {
   creatures: Creature[];
   trees: Tree[];
   food: FoodItem[];
-  resources: { wood: number; gems: number };
+  bones: Bone[];
+  resources: { wood: number; gems: number; bones: number };
   tool: ToolType;
   tick: number;
   camera: { x: number; y: number };
@@ -67,6 +82,12 @@ interface GameState {
   mouseScreen: { x: number; y: number };
   lastEvent: string;
   lastEventTimer: number;
+  // Feature 2: Player profile
+  playerProfile: string;
+  // Feature 4: World events & pollution
+  pollutionLevel: number;
+  worldEvents: string[];
+  lastThresholdPop: number;
 }
 
 // ── CONSTANTS ──────────────────────────────────────────────
@@ -95,7 +116,8 @@ const state: GameState = {
   creatures: [],
   trees: [],
   food: [],
-  resources: { wood: 0, gems: 0 },
+  bones: [],
+  resources: { wood: 0, gems: 0, bones: 0 },
   tool: 'feed',
   tick: 0,
   camera: { x: 0, y: 0 },
@@ -103,7 +125,14 @@ const state: GameState = {
   mouseScreen: { x: 0, y: 0 },
   lastEvent: '',
   lastEventTimer: 0,
+  playerProfile: '',
+  pollutionLevel: 0,
+  worldEvents: [],
+  lastThresholdPop: 0,
 };
+
+// Feature 2: Player action tracking
+const playerActions: string[] = [];
 
 // ── FACTORIES ──────────────────────────────────────────────
 
@@ -119,6 +148,7 @@ function createCreature(wx: number, wy: number): Creature {
     visualEffect: 'normal',
     visualEffectTimer: 0,
     targetFood: null,
+    evolutionGeneration: 0,
   };
 }
 
@@ -325,7 +355,29 @@ function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, cre
     ctx.fillText('~', sx + 4, cy - s * 2 - 6);
   }
 
+  // Feature 1: Generation label above creature
+  const gen = creature.evolutionGeneration || 0;
+  if (gen > 0) {
+    ctx.fillStyle = 'rgba(180,180,255,0.75)';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Gen ${gen}`, sx, cy - s * 2 - 14);
+    ctx.textAlign = 'left';
+  }
+
   ctx.restore();
+}
+
+// Feature 3: Draw bone (white cross)
+function drawBone(ctx: CanvasRenderingContext2D, bone: Bone): void {
+  const { x: sx, y: sy } = worldToScreen(bone.x, bone.y);
+  ctx.fillStyle = 'rgba(220, 220, 220, 0.85)';
+  ctx.font = '14px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('\u271D', sx, sy - 4);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
 }
 
 // ── INDEXEDDB PERSISTENCE ──────────────────────────────────
@@ -350,6 +402,148 @@ function saveCreatureEvent(creature: Creature, tool: string, outcome: Record<str
   };
 }
 
+// ── FEATURE 1: SELF-EVOLVING BEHAVIOR ─────────────────────
+
+async function evolveChildBehavior(parent: Creature, child: Creature): Promise<void> {
+  const apiKey = (window as unknown as Record<string, string>)['__ANTHROPIC_KEY__'];
+  if (!apiKey) return;
+
+  const parentBehavior = parent.behaviorCode || 'default wandering';
+  const parentEvents = parent.eventLog?.slice(-5).join('; ') || 'no events';
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        system: `You write JavaScript behavior functions for digital creatures in a god-game.
+The function receives (creature, state, dt) and can modify creature.vx, creature.vy, creature.hunger, creature.happiness.
+Write compact, valid JS. No async. No external calls. Max 8 lines.
+The behavior should be a MUTATION of the parent — slightly different, not completely random.
+Return ONLY the function body as a string, no wrapper, no explanation.`,
+        messages: [{
+          role: 'user',
+          content: `Parent behavior: ${parentBehavior}
+Parent events: ${parentEvents}
+Generation: ${(parent.evolutionGeneration || 0) + 1}
+
+Write a mutated behavior function body for the child creature. Example output:
+if (creature.hunger < 40) { creature.vx += (Math.random()-0.5)*0.5; }
+if (creature.happiness > 80) { creature.vy -= 0.1; }`,
+        }],
+      }),
+    });
+
+    const data = await resp.json() as { content?: Array<{ text: string }> };
+    const code = data.content?.[0]?.text?.trim() || '';
+    child.behaviorCode = code;
+    child.evolutionGeneration = (parent.evolutionGeneration || 0) + 1;
+
+    try {
+      // Safe eval with limited scope
+      child.behaviorFn = new Function('creature', 'state', 'dt', code);
+    } catch (e) {
+      console.warn('Invalid behavior code:', e);
+    }
+  } catch (e) {
+    console.warn('evolveChildBehavior fetch failed:', e);
+  }
+}
+
+// ── FEATURE 2: PLAYER PROFILE ─────────────────────────────
+
+async function updatePlayerProfile(): Promise<void> {
+  const apiKey = (window as unknown as Record<string, string>)['__ANTHROPIC_KEY__'];
+  if (!apiKey) return;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 100,
+        system: "You analyze a god-game player's behavior and return a single short archetype label (3-6 words). Be specific and slightly unsettling. Examples: \"patient gardener, feeds before it hurts\", \"chaotic neutral, tests edges\", \"neglectful creator, ignores hunger\". Return ONLY the label.",
+        messages: [{
+          role: 'user',
+          content: `Recent actions:\n${playerActions.slice(-10).join('\n')}`,
+        }],
+      }),
+    });
+    const data = await resp.json() as { content?: Array<{ text: string }> };
+    state.playerProfile = data.content?.[0]?.text?.trim() || '';
+  } catch (e) {
+    console.warn('updatePlayerProfile failed:', e);
+  }
+}
+
+// ── FEATURE 4: WORLD THRESHOLD EVENTS ─────────────────────
+
+async function checkWorldThresholds(): Promise<void> {
+  const pop = state.creatures.filter(c => c.alive).length;
+  const apiKey = (window as unknown as Record<string, string>)['__ANTHROPIC_KEY__'];
+  if (!apiKey) return;
+
+  const lastTriggered = state.lastThresholdPop || 0;
+  if (pop > 0 && pop % 5 === 0 && pop !== lastTriggered) {
+    state.lastThresholdPop = pop;
+
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 150,
+          system: 'You narrate world events in a creature god-game. The population just crossed a milestone. Return JSON: {"event": "short name", "log": "2 sentence narrative in present tense", "pollution_increase": 0-3, "food_scarcity": true/false}',
+          messages: [{
+            role: 'user',
+            content: `Population: ${pop}. Bones collected: ${state.resources.bones || 0}. Player profile: ${state.playerProfile || 'unknown'}. Generate a world event.`,
+          }],
+        }),
+      });
+      const data = await resp.json() as { content?: Array<{ text: string }> };
+      try {
+        const ev = JSON.parse(data.content?.[0]?.text || '{}') as {
+          event?: string;
+          log?: string;
+          pollution_increase?: number;
+          food_scarcity?: boolean;
+        };
+        state.worldEvents.unshift(ev.log || ev.event || '');
+        if (state.worldEvents.length > 5) state.worldEvents.pop();
+        if (ev.food_scarcity) {
+          // Kill some trees
+          state.trees.forEach(t => { if (Math.random() < 0.3) t.health = 0; });
+        }
+        if ((ev.pollution_increase || 0) > 0) {
+          state.pollutionLevel = Math.min(10, (state.pollutionLevel || 0) + (ev.pollution_increase || 0));
+        }
+        state.lastEvent = ev.log || ev.event || '';
+        state.lastEventTimer = 300;
+      } catch (parseErr) {
+        console.warn('World event parse failed:', parseErr);
+      }
+    } catch (e) {
+      console.warn('checkWorldThresholds fetch failed:', e);
+    }
+  }
+}
+
 // ── LLM TOOL OUTCOMES ──────────────────────────────────────
 
 async function applyToolToCreature(tool: ToolType, creature: Creature): Promise<void> {
@@ -359,8 +553,15 @@ async function applyToolToCreature(tool: ToolType, creature: Creature): Promise<
     if (tool === 'feed') feedCreature(creature);
     else if (tool === 'clean') cleanCreature(creature);
     else if (tool === 'play') playWithCreature(creature);
+    // Feature 2: Track actions even in fallback
+    playerActions.push(`${tool} on creature with hunger=${Math.round(creature.hunger)}`);
+    if (playerActions.length % 5 === 0) void updatePlayerProfile();
     return;
   }
+
+  // Feature 2: Log this action
+  playerActions.push(`${tool} on creature with hunger=${Math.round(creature.hunger)}`);
+  if (playerActions.length % 5 === 0) void updatePlayerProfile();
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -426,7 +627,14 @@ Define the outcome. Return JSON:
 
       if (outcome.split && state.creatures.length < 20) {
         const child = createCreature(creature.x + 1, creature.y + 1);
+        child.hunger = 60;
+        child.clean = 80;
+        child.happiness = 80;
+        // Copy parent event log as lineage
+        child.eventLog = [...(creature.eventLog || [])];
         state.creatures.push(child);
+        // Feature 1: Evolve behavior for child
+        void evolveChildBehavior(creature, child);
       }
 
       // Log to creature history
@@ -509,6 +717,8 @@ function updateCreature(c: Creature, dt: number): void {
     c.alive = false;
     c.diedAt = state.tick;
     c.state = 'dying';
+    // Feature 3: Drop a bone when creature dies
+    state.bones.push({ x: c.x, y: c.y, age: 0 });
     return;
   }
 
@@ -528,7 +738,11 @@ function updateCreature(c: Creature, dt: number): void {
       newC.hunger = 60;
       newC.clean = 80;
       newC.happiness = 80;
+      // Copy parent event log as lineage
+      newC.eventLog = [...(c.eventLog || [])];
       state.creatures.push(newC);
+      // Feature 1: Evolve behavior for naturally-split child
+      void evolveChildBehavior(c, newC);
     }
   }
 
@@ -581,6 +795,20 @@ function updateCreature(c: Creature, dt: number): void {
 
   c.x = Math.max(0, Math.min(WORLD_W - 1, c.x + c.vx * dt));
   c.y = Math.max(0, Math.min(WORLD_H - 1, c.y + c.vy * dt));
+
+  // Feature 1: Apply evolved behavior function after normal update
+  if (c.behaviorFn) {
+    try {
+      c.behaviorFn(c, state, dt);
+      // Clamp values after behavior runs
+      c.hunger = Math.max(0, Math.min(100, c.hunger));
+      c.happiness = Math.max(0, Math.min(100, c.happiness));
+      c.vx = Math.max(-3, Math.min(3, c.vx));
+      c.vy = Math.max(-3, Math.min(3, c.vy));
+    } catch (_e) {
+      c.behaviorFn = undefined; // kill bad behavior
+    }
+  }
 }
 
 function feedCreature(c: Creature): void {
@@ -639,7 +867,8 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
   state.camera.x = w / 2 - (midWx - midWy) * (TILE_W / 2);
   state.camera.y = h / 2 - (midWx + midWy) * (TILE_H / 2);
 
-  // Ground tiles
+  // Ground tiles with optional pollution overlay
+  const pl = state.pollutionLevel || 0;
   for (let wy = 0; wy < WORLD_H; wy++) {
     for (let wx = 0; wx < WORLD_W; wx++) {
       const { x: sx, y: sy } = worldToScreen(wx, wy);
@@ -654,6 +883,24 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
       ctx.lineTo(sx - TILE_W / 2, sy);
       ctx.closePath();
       ctx.stroke();
+
+      // Feature 4: Pollution overlay at world edges
+      if (pl > 0) {
+        const distFromEdge = Math.min(wx, wy, WORLD_W - 1 - wx, WORLD_H - 1 - wy);
+        const edgeBand = 3; // tiles deep from edge
+        if (distFromEdge < edgeBand) {
+          const strength = (edgeBand - distFromEdge) / edgeBand;
+          const alpha = strength * (pl / 10) * 0.7;
+          ctx.fillStyle = `rgba(136, 51, 170, ${alpha.toFixed(2)})`;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - TILE_H / 2);
+          ctx.lineTo(sx + TILE_W / 2, sy);
+          ctx.lineTo(sx, sy + TILE_H / 2);
+          ctx.lineTo(sx - TILE_W / 2, sy);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
     }
   }
 
@@ -662,6 +909,11 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
     const { x: sx, y: sy } = worldToScreen(tree.x, tree.y);
     drawTree(ctx, sx, sy, tree);
   });
+
+  // Feature 3: Draw bones
+  for (const bone of state.bones) {
+    drawBone(ctx, bone);
+  }
 
   // Food items (draw shadows first, then apples)
   for (const item of state.food) {
@@ -710,15 +962,54 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
     ctx.fillText(`> ${state.lastEvent.slice(0, 50)}`, 12, h - 8);
     ctx.globalAlpha = 1;
   }
+
+  // Feature 5: World Events log panel (bottom-right)
+  if (state.worldEvents.length > 0) {
+    const panelX = w - 240;
+    const panelY = h - 80;
+    const panelW = 228;
+    const lineH = 14;
+    const displayEvents = state.worldEvents.slice(0, 3);
+    const panelH = 24 + displayEvents.length * lineH;
+
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = 'rgba(10, 8, 20, 0.85)';
+    ctx.fillRect(panelX, panelY, panelW, panelH);
+    ctx.strokeStyle = 'rgba(136, 51, 170, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(panelX, panelY, panelW, panelH);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = 'rgba(136, 51, 170, 0.9)';
+    ctx.font = '8px monospace';
+    ctx.fillText('\u256D\u2500\u2500 WORLD \u2500\u2500\u256E', panelX + 6, panelY + 12);
+
+    ctx.fillStyle = 'rgba(180, 150, 200, 0.6)';
+    ctx.font = '8px monospace';
+    displayEvents.forEach((ev, i) => {
+      const truncated = ev.slice(0, 34);
+      ctx.fillText(`> ${truncated}`, panelX + 6, panelY + 24 + i * lineH);
+    });
+  }
 }
 
 // ── HUD ────────────────────────────────────────────────────
 
 function updateHUD(): void {
   const alive = state.creatures.filter(c => c.alive).length;
-  document.getElementById('population')!.textContent = `Pop: ${alive}`;
-  document.getElementById('wood')!.textContent = `Wood: ${state.resources.wood}`;
-  document.getElementById('gems')!.textContent = `Gems: ${state.resources.gems}`;
+  const popEl = document.getElementById('population');
+  const woodEl = document.getElementById('wood');
+  const gemsEl = document.getElementById('gems');
+  const bonesEl = document.getElementById('bones');
+  const profileEl = document.getElementById('player-profile');
+  if (popEl) popEl.textContent = `Pop: ${alive}`;
+  if (woodEl) woodEl.textContent = `Wood: ${state.resources.wood}`;
+  if (gemsEl) gemsEl.textContent = `Gems: ${state.resources.gems}`;
+  if (bonesEl) bonesEl.textContent = `Bones: ${state.resources.bones}`;
+  // Feature 2: Player profile display
+  if (profileEl) {
+    profileEl.textContent = state.playerProfile ? `[ ${state.playerProfile} ]` : '';
+  }
 }
 
 // ── INPUT ──────────────────────────────────────────────────
@@ -759,6 +1050,40 @@ function setupInput(canvas: HTMLCanvasElement): void {
       return;
     }
 
+    // Chop tool: check bones first (Feature 3)
+    if (state.tool === 'chop') {
+      let harvested = false;
+      state.bones = state.bones.filter(bone => {
+        const dist = Math.sqrt((bone.x - wx) ** 2 + (bone.y - wy) ** 2);
+        if (dist < 1.5) {
+          state.resources.bones = (state.resources.bones || 0) + 1;
+          harvested = true;
+          return false; // remove from array
+        }
+        return true;
+      });
+
+      if (!harvested) {
+        // Check trees
+        let nearestTree: Tree | null = null;
+        let nearestTreeDist = Infinity;
+        for (const t of state.trees) {
+          if (t.health <= 0) continue;
+          const dist = (t.x - wx) ** 2 + (t.y - wy) ** 2;
+          if (dist < nearestTreeDist && dist < 6.25) {
+            nearestTree = t;
+            nearestTreeDist = dist;
+          }
+        }
+        if (nearestTree) {
+          nearestTree.health--;
+          state.resources.wood += 2;
+          if (nearestTree.health <= 0) state.resources.wood += 3;
+        }
+      }
+      return;
+    }
+
     // Find nearest alive creature within 2.5 world units
     let nearest: Creature | null = null;
     let nearestDist = Infinity;
@@ -774,24 +1099,6 @@ function setupInput(canvas: HTMLCanvasElement): void {
     if (nearest) {
       // Call LLM to define outcome for any non-feed tool
       void applyToolToCreature(state.tool, nearest);
-    }
-
-    if (state.tool === 'chop') {
-      let nearestTree: Tree | null = null;
-      let nearestTreeDist = Infinity;
-      for (const t of state.trees) {
-        if (t.health <= 0) continue;
-        const dist = (t.x - wx) ** 2 + (t.y - wy) ** 2;
-        if (dist < nearestTreeDist && dist < 6.25) {
-          nearestTree = t;
-          nearestTreeDist = dist;
-        }
-      }
-      if (nearestTree) {
-        nearestTree.health--;
-        state.resources.wood += 2;
-        if (nearestTree.health <= 0) state.resources.wood += 3;
-      }
     }
   });
 }
@@ -821,6 +1128,7 @@ function main(): void {
 
   {
     let lastTime = performance.now();
+    let worldCheckTimer = 0;
 
     function loop(now: number): void {
       const dt = Math.min((now - lastTime) / 16.67, 3);
@@ -841,6 +1149,13 @@ function main(): void {
       // Tick down event log timer
       if (state.lastEventTimer > 0) {
         state.lastEventTimer -= dt;
+      }
+
+      // Feature 4: Check world thresholds every 60 frames
+      worldCheckTimer += dt;
+      if (worldCheckTimer >= 60) {
+        worldCheckTimer = 0;
+        void checkWorldThresholds();
       }
 
       render(ctx, canvas, state.tick);
