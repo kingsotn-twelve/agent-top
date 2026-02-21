@@ -1100,16 +1100,7 @@ def _detail_content_height(sel_agent, pw, cache):
     if not sel_agent:
         return 3
     if sel_agent.get("is_session"):
-        rows = 3  # header + tokens + divider
-        sid = sel_agent.get("session_id", "")
-        cwd = sel_agent.get("cwd", "")
-        hist_cache = cache.get("_hist_cache", {})
-        if hist_cache.get("sid") == sid:
-            n_msgs = len(hist_cache.get("data", {}).get("messages", []))
-        else:
-            n_msgs = 1  # estimate before cache loads
-        rows += max(n_msgs, 1)
-        return rows
+        return 3 + 12  # header + tokens + divider + agents + tools (estimate)
     if sel_agent.get("is_teammate"):
         tasks = sel_agent.get("_tasks", [])
         return 2 + (1 if not tasks else 2 + len(tasks))  # header + divider + progress + blank + tasks
@@ -1133,21 +1124,19 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
     max_row_virtual = max_row + scroll
 
     if sel_agent and sel_agent.get("is_session"):
-        # Rich session detail from JSONL transcript
+        # Session detail: header + agents + tools
         sid = sel_agent["session_id"]
         dur = fmt_dur(sel_agent.get("started_at", ""))
         sid_short = sid[:7]
         cwd = sel_agent.get("cwd", "")
         tag = dir_tag(cwd)
 
-        # Cache JSONL read per session
+        # Header with model + tokens from JSONL
         hist_cache = cache.setdefault("_hist_cache", {})
         if hist_cache.get("sid") != sid:
             hist_cache["sid"] = sid
             hist_cache["data"] = read_session_history(sid, cwd)
         hist = hist_cache["data"]
-
-        # Header with model + tokens
         model = hist.get("model", "")
         model_short = model.replace("claude-", "").replace("-", " ") if model else ""
         tok_in = hist.get("total_input", 0)
@@ -1221,19 +1210,6 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
                 P(pr, col, ts, DIM)
                 P(pr, col + 9, tool_str[:pw - 10], YELLOW)
-                pr += 1
-            pr += 1
-
-        # Conversation messages from JSONL
-        messages = hist.get("messages", [])
-        if messages and pr < max_row_virtual:
-            P(pr, col, f"MESSAGES  {len(messages)}", CYAN)
-            pr += 1
-            for msg in messages:
-                if pr >= max_row_virtual:
-                    break
-                text = msg["text"].replace("\n", " ")[:pw]
-                P(pr, col, text, WHITE)
                 pr += 1
 
     elif sel_agent and sel_agent.get("is_teammate"):
