@@ -718,9 +718,21 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     session_tools = cache.get("session_tools", {})
     rw = x + w  # absolute right edge
 
-    # Build tree: sessions -> agents -> tools
+    # Scope to selected session
+    vis = state.get("visible_items", [])
+    sel = state.get("selected", -1)
+    sel_item = vis[sel] if 0 <= sel < len(vis) else None
+    target_sid = sel_item.get("session_id", "") if sel_item else ""
+    if not target_sid and active_all:
+        target_sid = active_all[0]["session_id"]
+    scoped = [s for s in active_all if s["session_id"] == target_sid]
+    if not scoped:
+        safe_add(stdscr, y + 1, x + 2, "select a session", rw, DIM)
+        return
+
+    # Build tree: session -> agents -> tools
     pr = y
-    for s in active_all:
+    for s in scoped:
         if pr >= y + h:
             break
         sid = s["session_id"]
