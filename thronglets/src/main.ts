@@ -6,37 +6,72 @@
  * The population grows exponentially. You can't keep up. That's the point.
  */
 
+// ── TYPES ──────────────────────────────────────────────────
+
+interface Creature {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hunger: number;
+  clean: number;
+  happiness: number;
+  age: number;
+  alive: boolean;
+  splitTimer: number;
+  state: 'idle' | 'walking' | 'eating' | 'bathing' | 'playing' | 'dying';
+  stateTimer: number;
+  animFrame: number;
+  size: number;
+  bobPhase: number;
+}
+
+interface Tree {
+  x: number;
+  y: number;
+  type: 'apple';
+  health: number;
+  regrowTimer: number;
+}
+
+type ToolType = 'feed' | 'clean' | 'play' | 'chop';
+
+interface GameState {
+  creatures: Creature[];
+  trees: Tree[];
+  resources: { wood: number; gems: number };
+  tool: ToolType;
+  tick: number;
+  camera: { x: number; y: number };
+  mouseWorld: { x: number; y: number };
+  mouseScreen: { x: number; y: number };
+}
+
 // ── CONSTANTS ──────────────────────────────────────────────
+
 const TILE_W = 32;
 const TILE_H = 16;
-const WORLD_W = 20;  // grid tiles wide
-const WORLD_H = 20;  // grid tiles tall
-const PIXEL_SCALE = 2;
+const WORLD_W = 20;
+const WORLD_H = 20;
 
-// Color palette — retro VGA-inspired
 const COLORS = {
-  grass:     ['#2d5a27', '#3a7d32', '#4a9a3c', '#3a7d32'],  // 4 grass shades
-  dirt:      '#8b6914',
-  water:     '#2856a6',
+  grass: ['#2d5a27', '#3a7d32', '#4a9a3c', '#3a7d32'] as const,
+  dirt: '#8b6914',
   treeTrunk: '#5c3a1e',
-  treeLeaf:  '#2d8a2e',
-  creature:  '#ffd700',  // yellow thronglet
+  treeLeaf: '#2d8a2e',
+  creature: '#ffd700',
   creatureHappy: '#ffe44d',
-  creatureSad:   '#cc9900',
-  creatureDead:  '#666666',
-  egg:       '#fff5cc',
-  food:      '#ff4444',
+  creatureSad: '#cc9900',
+  creatureDead: '#666666',
+  food: '#ff4444',
   pollution: '#8833aa',
-  ui_bg:     '#16213e',
-  ui_border: '#0f3460',
-  ui_accent: '#e94560',
-};
+} as const;
 
 // ── GAME STATE ─────────────────────────────────────────────
-const state = {
+
+const state: GameState = {
   creatures: [],
   trees: [],
-  buildings: [],
   resources: { wood: 0, gems: 0 },
   tool: 'feed',
   tick: 0,
@@ -45,53 +80,48 @@ const state = {
   mouseScreen: { x: 0, y: 0 },
 };
 
-// ── CREATURE ───────────────────────────────────────────────
-function createCreature(wx, wy) {
+// ── FACTORIES ──────────────────────────────────────────────
+
+function createCreature(wx: number, wy: number): Creature {
   return {
-    x: wx,
-    y: wy,
-    vx: 0,
-    vy: 0,
-    hunger: 100,     // 0 = starving, 100 = full
-    clean: 100,      // 0 = filthy, 100 = spotless
-    happiness: 100,  // 0 = miserable, 100 = ecstatic
-    age: 0,
-    alive: true,
-    splitTimer: 0,   // counts up; splits at 300
-    state: 'idle',   // idle, walking, eating, bathing, playing, dying
-    stateTimer: 0,
-    animFrame: 0,
-    size: 1,         // grows slightly with age
-    bobPhase: Math.random() * Math.PI * 2,
+    x: wx, y: wy, vx: 0, vy: 0,
+    hunger: 100, clean: 100, happiness: 100,
+    age: 0, alive: true, splitTimer: 0,
+    state: 'idle', stateTimer: 0, animFrame: 0,
+    size: 1, bobPhase: Math.random() * Math.PI * 2,
   };
 }
 
-function createTree(wx, wy) {
+function createTree(wx: number, wy: number): Tree {
   return { x: wx, y: wy, type: 'apple', health: 3, regrowTimer: 0 };
 }
 
 // ── ISO PROJECTION ─────────────────────────────────────────
-function worldToScreen(wx, wy) {
-  const sx = (wx - wy) * (TILE_W / 2) + state.camera.x;
-  const sy = (wx + wy) * (TILE_H / 2) + state.camera.y;
-  return { x: sx, y: sy };
+
+function worldToScreen(wx: number, wy: number): { x: number; y: number } {
+  return {
+    x: (wx - wy) * (TILE_W / 2) + state.camera.x,
+    y: (wx + wy) * (TILE_H / 2) + state.camera.y,
+  };
 }
 
-function screenToWorld(sx, sy) {
+function screenToWorld(sx: number, sy: number): { x: number; y: number } {
   const cx = sx - state.camera.x;
   const cy = sy - state.camera.y;
-  const wx = (cx / (TILE_W / 2) + cy / (TILE_H / 2)) / 2;
-  const wy = (cy / (TILE_H / 2) - cx / (TILE_W / 2)) / 2;
-  return { x: Math.floor(wx), y: Math.floor(wy) };
+  return {
+    x: Math.floor((cx / (TILE_W / 2) + cy / (TILE_H / 2)) / 2),
+    y: Math.floor((cy / (TILE_H / 2) - cx / (TILE_W / 2)) / 2),
+  };
 }
 
-// ── PIXEL ART DRAWING ──────────────────────────────────────
-function drawPixelRect(ctx, x, y, w, h, color) {
+// ── DRAWING ────────────────────────────────────────────────
+
+function drawPixelRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string): void {
   ctx.fillStyle = color;
   ctx.fillRect(Math.floor(x), Math.floor(y), w, h);
 }
 
-function drawIsoDiamond(ctx, sx, sy, color) {
+function drawIsoDiamond(ctx: CanvasRenderingContext2D, sx: number, sy: number, color: string): void {
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.moveTo(sx, sy - TILE_H / 2);
@@ -102,73 +132,68 @@ function drawIsoDiamond(ctx, sx, sy, color) {
   ctx.fill();
 }
 
-function drawTree(ctx, sx, sy, tree) {
-  // Trunk — 4px wide brown rectangle
+function drawTree(ctx: CanvasRenderingContext2D, sx: number, sy: number, tree: Tree): void {
   drawPixelRect(ctx, sx - 2, sy - 16, 4, 12, COLORS.treeTrunk);
-  // Canopy — green diamond/circle
   const leafColor = tree.health > 0 ? COLORS.treeLeaf : '#555';
   ctx.fillStyle = leafColor;
   ctx.beginPath();
   ctx.arc(sx, sy - 20, 8, 0, Math.PI * 2);
   ctx.fill();
-  // Fruit dots if apple tree
   if (tree.type === 'apple' && tree.health > 0) {
     drawPixelRect(ctx, sx - 4, sy - 22, 3, 3, COLORS.food);
     drawPixelRect(ctx, sx + 2, sy - 18, 3, 3, COLORS.food);
   }
 }
 
-function drawCreature(ctx, sx, sy, creature, tick) {
+function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, creature: Creature, tick: number): void {
   if (!creature.alive) return;
 
   const bob = Math.sin(creature.bobPhase + tick * 0.08) * 2;
   const cy = sy + bob;
 
-  // Body color based on mood
-  let bodyColor;
+  let bodyColor: string;
   if (creature.hunger < 20 || creature.clean < 20 || creature.happiness < 20) {
     bodyColor = COLORS.creatureSad;
   } else {
     bodyColor = creature.happiness > 70 ? COLORS.creatureHappy : COLORS.creature;
   }
 
-  const s = 4 + Math.min(creature.age / 100, 2);  // size grows with age
+  const s = 8 + Math.min(creature.age / 100, 4);
 
-  // Body — round yellow blob
+  // Body
   ctx.fillStyle = bodyColor;
   ctx.beginPath();
   ctx.ellipse(sx, cy - s, s, s * 0.8, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Eyes — two black dots
-  const eyeY = cy - s - 1;
-  drawPixelRect(ctx, sx - 2, eyeY, 2, 2, '#000');
-  drawPixelRect(ctx, sx + 1, eyeY, 2, 2, '#000');
+  // Eyes
+  const eyeY = cy - s * 0.4;
+  drawPixelRect(ctx, sx - s * 0.35, eyeY, 3, 3, '#000');
+  drawPixelRect(ctx, sx + s * 0.15, eyeY, 3, 3, '#000');
 
-  // Mouth — happy or sad
+  // Mouth
   if (creature.happiness > 50) {
-    // Happy smile
-    drawPixelRect(ctx, sx - 1, eyeY + 3, 3, 1, '#000');
+    drawPixelRect(ctx, sx - s * 0.2, eyeY + s * 0.4, Math.max(3, s * 0.3), 2, '#000');
   } else {
-    // Sad frown
-    drawPixelRect(ctx, sx - 1, eyeY + 4, 3, 1, '#000');
+    drawPixelRect(ctx, sx - s * 0.2, eyeY + s * 0.5, Math.max(3, s * 0.3), 2, '#000');
   }
 
-  // Status indicators (floating above)
+  // Need indicators
   if (creature.hunger < 30) {
     ctx.fillStyle = COLORS.food;
-    ctx.font = '8px monospace';
-    ctx.fillText('!', sx - 2, cy - s * 2 - 4);
+    ctx.font = '10px monospace';
+    ctx.fillText('!', sx - 2, cy - s * 2 - 6);
   }
   if (creature.clean < 30) {
     ctx.fillStyle = '#88aaff';
-    ctx.font = '8px monospace';
-    ctx.fillText('~', sx + 4, cy - s * 2 - 4);
+    ctx.font = '10px monospace';
+    ctx.fillText('~', sx + 4, cy - s * 2 - 6);
   }
 }
 
 // ── GAME LOGIC ─────────────────────────────────────────────
-function updateCreature(c, dt) {
+
+function updateCreature(c: Creature, dt: number): void {
   if (!c.alive) return;
 
   c.age += dt;
@@ -178,14 +203,12 @@ function updateCreature(c, dt) {
   c.bobPhase += dt * 0.1;
   c.stateTimer -= dt;
 
-  // Die if too hungry
   if (c.hunger <= 0) {
     c.alive = false;
     c.state = 'dying';
     return;
   }
 
-  // Mood affects happiness
   if (c.hunger > 60 && c.clean > 60) {
     c.happiness = Math.min(100, c.happiness + dt * 0.3);
   }
@@ -195,7 +218,6 @@ function updateCreature(c, dt) {
     c.splitTimer += dt;
     if (c.splitTimer > 300) {
       c.splitTimer = 0;
-      // Spawn new creature nearby
       const newC = createCreature(
         c.x + (Math.random() - 0.5) * 3,
         c.y + (Math.random() - 0.5) * 3
@@ -220,16 +242,11 @@ function updateCreature(c, dt) {
     c.stateTimer = 30 + Math.random() * 80;
   }
 
-  // Move
-  c.x += c.vx * dt;
-  c.y += c.vy * dt;
-
-  // Keep in bounds
-  c.x = Math.max(0, Math.min(WORLD_W - 1, c.x));
-  c.y = Math.max(0, Math.min(WORLD_H - 1, c.y));
+  c.x = Math.max(0, Math.min(WORLD_W - 1, c.x + c.vx * dt));
+  c.y = Math.max(0, Math.min(WORLD_H - 1, c.y + c.vy * dt));
 }
 
-function feedCreature(c) {
+function feedCreature(c: Creature): void {
   if (!c.alive) return;
   c.hunger = Math.min(100, c.hunger + 40);
   c.happiness = Math.min(100, c.happiness + 10);
@@ -237,7 +254,7 @@ function feedCreature(c) {
   c.stateTimer = 30;
 }
 
-function cleanCreature(c) {
+function cleanCreature(c: Creature): void {
   if (!c.alive) return;
   c.clean = Math.min(100, c.clean + 50);
   c.happiness = Math.min(100, c.happiness + 10);
@@ -245,7 +262,7 @@ function cleanCreature(c) {
   c.stateTimer = 30;
 }
 
-function playWithCreature(c) {
+function playWithCreature(c: Creature): void {
   if (!c.alive) return;
   c.happiness = Math.min(100, c.happiness + 30);
   c.state = 'playing';
@@ -253,44 +270,44 @@ function playWithCreature(c) {
 }
 
 // ── WORLD GENERATION ───────────────────────────────────────
-function initWorld() {
-  // Place some initial trees
+
+function initWorld(): void {
   for (let i = 0; i < 8; i++) {
     state.trees.push(createTree(
       3 + Math.floor(Math.random() * (WORLD_W - 6)),
       3 + Math.floor(Math.random() * (WORLD_H - 6))
     ));
   }
-
-  // First creature — hatches from an egg
-  const first = createCreature(WORLD_W / 2, WORLD_H / 2);
-  state.creatures.push(first);
+  for (let i = 0; i < 3; i++) {
+    state.creatures.push(createCreature(
+      WORLD_W / 2 + (Math.random() - 0.5) * 4,
+      WORLD_H / 2 + (Math.random() - 0.5) * 4
+    ));
+  }
+  console.log(`World init: ${state.creatures.length} creatures, ${state.trees.length} trees`);
 }
 
 // ── RENDER ─────────────────────────────────────────────────
-function render(ctx, canvas, tick) {
+
+function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: number): void {
   const w = canvas.width;
   const h = canvas.height;
 
-  // Clear with dark background
   ctx.fillStyle = '#1a1a2e';
   ctx.fillRect(0, 0, w, h);
 
-  // Center camera on world
-  state.camera.x = w / 2;
-  state.camera.y = h / 4;
+  // Center camera so world middle is at screen center
+  const midWx = WORLD_W / 2;
+  const midWy = WORLD_H / 2;
+  state.camera.x = w / 2 - (midWx - midWy) * (TILE_W / 2);
+  state.camera.y = h / 2 - (midWx + midWy) * (TILE_H / 2);
 
-  // Draw ground tiles (isometric)
+  // Ground tiles
   for (let wy = 0; wy < WORLD_H; wy++) {
     for (let wx = 0; wx < WORLD_W; wx++) {
       const { x: sx, y: sy } = worldToScreen(wx, wy);
-      // Skip if off screen
       if (sx < -TILE_W || sx > w + TILE_W || sy < -TILE_H || sy > h + TILE_H) continue;
-
-      const grassIdx = ((wx * 7 + wy * 13) % 4);
-      drawIsoDiamond(ctx, sx, sy, COLORS.grass[grassIdx]);
-
-      // Grid lines (very subtle)
+      drawIsoDiamond(ctx, sx, sy, COLORS.grass[(wx * 7 + wy * 13) % 4]);
       ctx.strokeStyle = 'rgba(0,0,0,0.1)';
       ctx.lineWidth = 0.5;
       ctx.beginPath();
@@ -303,23 +320,22 @@ function render(ctx, canvas, tick) {
     }
   }
 
-  // Draw trees (sorted by y for depth)
-  const sortedTrees = [...state.trees].sort((a, b) => (a.x + a.y) - (b.x + b.y));
-  for (const tree of sortedTrees) {
+  // Trees (depth sorted)
+  [...state.trees].sort((a, b) => (a.x + a.y) - (b.x + b.y)).forEach(tree => {
     const { x: sx, y: sy } = worldToScreen(tree.x, tree.y);
     drawTree(ctx, sx, sy, tree);
-  }
+  });
 
-  // Draw creatures (sorted by y for depth)
-  const sortedCreatures = [...state.creatures].filter(c => c.alive)
-    .sort((a, b) => (a.x + a.y) - (b.x + b.y));
-  for (const c of sortedCreatures) {
-    const { x: sx, y: sy } = worldToScreen(c.x, c.y);
-    drawCreature(ctx, sx, sy, c, tick);
-  }
+  // Alive creatures (depth sorted)
+  state.creatures.filter(c => c.alive)
+    .sort((a, b) => (a.x + a.y) - (b.x + b.y))
+    .forEach(c => {
+      const { x: sx, y: sy } = worldToScreen(c.x, c.y);
+      drawCreature(ctx, sx, sy, c, tick);
+    });
 
-  // Draw dead creatures as grey dots (fade out)
-  for (const c of state.creatures.filter(c => !c.alive)) {
+  // Dead creatures fade out
+  state.creatures.filter(c => !c.alive).forEach(c => {
     const { x: sx, y: sy } = worldToScreen(c.x, c.y);
     ctx.fillStyle = COLORS.creatureDead;
     ctx.globalAlpha = Math.max(0, 1 - (tick - c.age) / 200);
@@ -327,7 +343,7 @@ function render(ctx, canvas, tick) {
     ctx.arc(sx, sy - 4, 3, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
-  }
+  });
 
   // Hover indicator
   const hw = state.mouseWorld;
@@ -345,27 +361,27 @@ function render(ctx, canvas, tick) {
   }
 }
 
-// ── UPDATE HUD ─────────────────────────────────────────────
-function updateHUD() {
+// ── HUD ────────────────────────────────────────────────────
+
+function updateHUD(): void {
   const alive = state.creatures.filter(c => c.alive).length;
-  document.getElementById('population').textContent = `Pop: ${alive}`;
-  document.getElementById('wood').textContent = `Wood: ${state.resources.wood}`;
-  document.getElementById('gems').textContent = `Gems: ${state.resources.gems}`;
+  document.getElementById('population')!.textContent = `Pop: ${alive}`;
+  document.getElementById('wood')!.textContent = `Wood: ${state.resources.wood}`;
+  document.getElementById('gems')!.textContent = `Gems: ${state.resources.gems}`;
 }
 
 // ── INPUT ──────────────────────────────────────────────────
-function setupInput(canvas) {
-  // Tool selection
-  document.querySelectorAll('.tool').forEach(btn => {
+
+function setupInput(canvas: HTMLCanvasElement): void {
+  document.querySelectorAll<HTMLButtonElement>('.tool').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tool').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      state.tool = btn.dataset.tool;
+      state.tool = btn.dataset.tool as ToolType;
     });
   });
 
-  // Mouse tracking
-  canvas.addEventListener('mousemove', (e) => {
+  canvas.addEventListener('mousemove', (e: MouseEvent) => {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -376,8 +392,7 @@ function setupInput(canvas) {
     state.mouseWorld = screenToWorld(state.mouseScreen.x, state.mouseScreen.y);
   });
 
-  // Click to interact
-  canvas.addEventListener('click', (e) => {
+  canvas.addEventListener('click', (e: MouseEvent) => {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -385,14 +400,12 @@ function setupInput(canvas) {
     const sy = (e.clientY - rect.top) * scaleY;
     const { x: wx, y: wy } = screenToWorld(sx, sy);
 
-    // Find nearest alive creature to click
-    let nearest = null;
+    // Find nearest alive creature
+    let nearest: Creature | null = null;
     let nearestDist = Infinity;
     for (const c of state.creatures) {
       if (!c.alive) continue;
-      const dx = c.x - wx;
-      const dy = c.y - wy;
-      const dist = dx * dx + dy * dy;
+      const dist = (c.x - wx) ** 2 + (c.y - wy) ** 2;
       if (dist < nearestDist && dist < 4) {
         nearest = c;
         nearestDist = dist;
@@ -404,21 +417,15 @@ function setupInput(canvas) {
         case 'feed': feedCreature(nearest); break;
         case 'clean': cleanCreature(nearest); break;
         case 'play': playWithCreature(nearest); break;
-        case 'chop':
-          // Chop nearest tree instead
-          break;
       }
     }
 
-    // Chop tool — find nearest tree
     if (state.tool === 'chop') {
-      let nearestTree = null;
+      let nearestTree: Tree | null = null;
       let nearestTreeDist = Infinity;
       for (const t of state.trees) {
         if (t.health <= 0) continue;
-        const dx = t.x - wx;
-        const dy = t.y - wy;
-        const dist = dx * dx + dy * dy;
+        const dist = (t.x - wx) ** 2 + (t.y - wy) ** 2;
         if (dist < nearestTreeDist && dist < 4) {
           nearestTree = t;
           nearestTreeDist = dist;
@@ -427,16 +434,15 @@ function setupInput(canvas) {
       if (nearestTree) {
         nearestTree.health--;
         state.resources.wood += 2;
-        if (nearestTree.health <= 0) {
-          state.resources.wood += 3;
-        }
+        if (nearestTree.health <= 0) state.resources.wood += 3;
       }
     }
   });
 }
 
 // ── BOOT SCREEN ────────────────────────────────────────────
-function drawBootScreen(ctx, canvas, callback) {
+
+function drawBootScreen(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, callback: () => void): void {
   const w = canvas.width;
   const h = canvas.height;
   ctx.fillStyle = '#000';
@@ -460,7 +466,7 @@ function drawBootScreen(ctx, canvas, callback) {
   let lineIdx = 0;
   let charIdx = 0;
 
-  function typeLine() {
+  function typeLine(): void {
     if (lineIdx >= lines.length) {
       setTimeout(callback, 800);
       return;
@@ -468,7 +474,6 @@ function drawBootScreen(ctx, canvas, callback) {
 
     const line = lines[lineIdx];
     if (charIdx <= line.length) {
-      // Redraw all previous lines + current partial
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
       ctx.font = '14px "Press Start 2P", monospace';
@@ -479,7 +484,6 @@ function drawBootScreen(ctx, canvas, callback) {
       }
       ctx.fillText(line.substring(0, charIdx), 20, 40 + lineIdx * 24);
 
-      // Blinking cursor
       if (Math.floor(Date.now() / 500) % 2 === 0) {
         const cursorX = 20 + charIdx * 9.5;
         ctx.fillRect(cursorX, 40 + lineIdx * 24 - 12, 10, 14);
@@ -497,45 +501,40 @@ function drawBootScreen(ctx, canvas, callback) {
   typeLine();
 }
 
-// ── MAIN LOOP ──────────────────────────────────────────────
-function main() {
-  const canvas = document.getElementById('game');
-  const ctx = canvas.getContext('2d');
+// ── MAIN ───────────────────────────────────────────────────
 
-  // Size canvas to window
-  function resize() {
+function main(): void {
+  const canvas = document.getElementById('game') as HTMLCanvasElement;
+  const ctx = canvas.getContext('2d')!;
+
+  function resize(): void {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight - 48;
   }
   resize();
   window.addEventListener('resize', resize);
 
-  // Boot screen first, then game
   drawBootScreen(ctx, canvas, () => {
     initWorld();
     setupInput(canvas);
 
     let lastTime = performance.now();
 
-    function loop(now) {
-      const dt = Math.min((now - lastTime) / 16.67, 3);  // normalize to ~60fps units
+    function loop(now: number): void {
+      const dt = Math.min((now - lastTime) / 16.67, 3);
       lastTime = now;
       state.tick++;
 
-      // Update all creatures
       for (const c of state.creatures) {
         updateCreature(c, dt);
       }
 
-      // Cull very old dead creatures
       state.creatures = state.creatures.filter(c =>
         c.alive || (state.tick - c.age) < 500
       );
 
-      // Render
       render(ctx, canvas, state.tick);
       updateHUD();
-
       requestAnimationFrame(loop);
     }
 
@@ -543,5 +542,4 @@ function main() {
   });
 }
 
-// Start
 main();
