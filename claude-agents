@@ -87,11 +87,14 @@ def friendly_tool(name: str, label: str = "") -> str:
 # Selection highlight variants (white-on-dark-gray)
 SEL = SEL_DIM = SEL_CYAN = SEL_YELLOW = SEL_GREEN = SEL_MAGENTA = 0
 BG_SEL = 236  # dark gray background
+BORDER_DIM = 0
+BORDER_BRIGHT = 0
 
 
 def init_colors():
     global GREEN, CYAN, YELLOW, DIM, MAGENTA, WHITE, RED
     global SEL, SEL_DIM, SEL_CYAN, SEL_YELLOW, SEL_GREEN, SEL_MAGENTA, BG_SEL
+    global BORDER_DIM, BORDER_BRIGHT
     curses.start_color()
     curses.use_default_colors()
     # Normal colors (pair 1-7)
@@ -127,6 +130,15 @@ def init_colors():
         SEL_YELLOW = curses.A_REVERSE | curses.A_BOLD
         SEL_GREEN = curses.A_REVERSE | curses.A_BOLD
         SEL_MAGENTA = curses.A_REVERSE | curses.A_BOLD
+    # Breathing border colors (pair 21-22: two brightness levels)
+    try:
+        curses.init_pair(21, 240, -1)  # dim border (exhale)
+        curses.init_pair(22, 245, -1)  # bright border (inhale)
+        BORDER_DIM = curses.color_pair(21)
+        BORDER_BRIGHT = curses.color_pair(22)
+    except curses.error:
+        BORDER_DIM = DIM
+        BORDER_BRIGHT = DIM
 
 
 # ── DATA QUERIES ─────────────────────────────────────────────
@@ -635,6 +647,29 @@ def sparkline(buckets, width=10):
         return BRAILLE[0] * width
     norm = [min(4, int(v / mx * 4.99)) if v > 0 else 0 for v in vals]
     return "".join(BRAILLE[norm[i] * 5 + norm[i + 1]] for i in range(0, n, 2))
+
+
+def breathing_attr(frame: int, activity_rate: float = 0.0) -> int:
+    """Return a border attr that pulses between dim and bright based on activity.
+
+    activity_rate: tool events per second (0.0 = idle, >1.0 = busy).
+    Returns a curses color pair that oscillates via sine wave.
+    """
+    if activity_rate <= 0:
+        # Very slow breathing when idle (6s cycle = ~30 frames at 5fps)
+        cycle_frames = 30
+    elif activity_rate < 0.5:
+        # Normal breathing (3.5s cycle = ~17 frames)
+        cycle_frames = 17
+    else:
+        # Fast breathing when busy (2s cycle = ~10 frames)
+        cycle_frames = 10
+
+    phase = math.sin(2 * math.pi * frame / cycle_frames)
+    # phase ranges -1 to 1; map to 0 or 1 (two brightness levels)
+    if phase > 0:
+        return BORDER_BRIGHT
+    return BORDER_DIM
 
 
 # ── GAME OF LIFE ─────────────────────────────────────────────
@@ -1446,6 +1481,11 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     team_session_ids = team_data["team_session_ids"]
     teams = team_data["teams"]
 
+    # Alive layer: global activity rate (tool events per second across all sessions)
+    total_activity = sum(sum(b) for b in activity.values())  # total tool events in last 60s
+    activity_rate = total_activity / 60.0 if total_activity else 0.0
+    border_attr = breathing_attr(frame, activity_rate)
+
     # Solo sessions: exclude team members (shown in TEAMS section instead)
     active = [s for s in active_all if s["session_id"] not in team_session_ids]
 
@@ -1564,7 +1604,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             box_title = f"TEAMS  {len(teams)} teams \u00b7 {n_team_members} active"
 
         teams_first_idx = len(visible_items)
-        draw_box(stdscr, cr, 0, teams_h, lw, title=box_title)
+        draw_box(stdscr, cr, 0, teams_h, lw, title=box_title, border_attr=border_attr)
         tr = cr + 1  # first content row inside box
 
         for team in teams:
@@ -1681,7 +1721,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         sess_title = f"SESSIONS  {' \u00b7 '.join(sess_counts)}" if sess_counts else "SESSIONS"
 
         sess_first_idx = len(visible_items)
-        draw_box(stdscr, cr, 0, sess_h, lw, title=sess_title)
+        draw_box(stdscr, cr, 0, sess_h, lw, title=sess_title, border_attr=border_attr)
         sr = cr + 1
 
         for s in active:
@@ -1795,7 +1835,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
     elif not teams:
         # No active sessions or agents — show idle box
-        draw_box(stdscr, cr, 0, sess_h, lw, title="SESSIONS")
+        draw_box(stdscr, cr, 0, sess_h, lw, title="SESSIONS", border_attr=border_attr)
         L(cr + 1, 2, "no active sessions or agents", DIM)
         cr += sess_h
 
@@ -1808,11 +1848,11 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
     hist_first_idx = len(visible_items)
     if show_inline_detail:
-        draw_box(stdscr, cr, 0, hist_h, lw, title="DETAIL")
+        draw_box(stdscr, cr, 0, hist_h, lw, title="DETAIL", border_attr=border_attr)
         _draw_detail(stdscr, cr + 1, 2, cr + hist_h - 1, lw - 1,
                      sel_agent, cache)
     else:
-        draw_box(stdscr, cr, 0, hist_h, lw, title="HISTORY")
+        draw_box(stdscr, cr, 0, hist_h, lw, title="HISTORY", border_attr=border_attr)
         hr = cr + 1
 
         history = []
