@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.1 — Feb 20, 2026
+
+### Full session history from JSONL transcripts
+
+DETAIL now reads `~/.claude/projects/{project}/{sessionId}.jsonl` for the complete conversation. Shows model name, token counts (input/output), all user messages, tool calls, and spawned agents — even for old/idle sessions.
+
+### Sessions persist until terminal closes
+
+No more disappearing sessions. Open terminals stay visible indefinitely. Clock freezes when idle. 50/50 left-right split.
+
+---
+
 ## v0.8.0 — Feb 20, 2026
 
 ### Three visualization modes
