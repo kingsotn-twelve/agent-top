@@ -1316,7 +1316,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                     }
                     random.seed()
                 lg = life_grids[life_sid]
-                if frame % 3 == 0:
+                if frame % 1 == 0:
                     lg["grid"] = life_step(lg["grid"], grid_rows, grid_cols)
                     lg["gen"] += 1
                     alive = sum(sum(row) for row in lg["grid"])
