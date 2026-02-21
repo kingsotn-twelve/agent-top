@@ -59,6 +59,8 @@ def query_db(db_path: str) -> dict:
         "completed_agents": [],
         "recent_prompts": [],
         "tool_events": {},  # session_id -> [{tool_name, tool_label}]
+        "tool_feed": [],  # [{session_id, tool_name, tool_label, created_at}] — recent across all sessions
+        "session_tools": {},  # session_id -> [{tool_name, tool_label, created_at}] — extended list for detail view
         "top_agents": [],
         "top_tools": [],
         "activity": {},
@@ -144,6 +146,36 @@ def query_db(db_path: str) -> dict:
             if tools:
                 # Reverse so oldest is first (left-to-right reading)
                 data["tool_events"][sid] = list(reversed(tools))
+
+        # Tool feed: recent tool events across all active sessions (for LIVE panel)
+        try:
+            for row in conn.execute(
+                """SELECT session_id, tool_name, tool_label, created_at FROM tool_event
+                   WHERE created_at > datetime('now', '-5 minutes')
+                   ORDER BY created_at DESC
+                   LIMIT 8"""
+            ):
+                data["tool_feed"].append(dict(row))
+        except sqlite3.OperationalError:
+            pass
+
+        # Session tools: extended tool list per active session (for DETAIL view)
+        for sid in active_sids:
+            try:
+                rows = []
+                for row in conn.execute(
+                    """SELECT tool_name, tool_label, created_at FROM tool_event
+                       WHERE session_id = ?
+                         AND created_at > datetime('now', '-30 minutes')
+                       ORDER BY created_at DESC
+                       LIMIT 20""",
+                    (sid,),
+                ):
+                    rows.append(dict(row))
+                if rows:
+                    data["session_tools"][sid] = list(reversed(rows))
+            except sqlite3.OperationalError:
+                pass
 
         # Activity buckets for sparklines (last 60s, 20 buckets of 3s each)
         for sid in active_sids:
@@ -509,6 +541,8 @@ def refresh_data(cache: dict) -> dict:
         "c_agents": data["completed_agents"],
         "recent": data["recent_prompts"],
         "tool_events": data["tool_events"],
+        "tool_feed": data["tool_feed"],
+        "session_tools": data["session_tools"],
         "activity": data["activity"],
         "team_data": team_data,
         "session_lookup": {s["session_id"]: s for s in active_all},
@@ -523,7 +557,61 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, teams, top_agents
     def P(r, c, text, attr=0):
         safe_add(stdscr, r, c, text, max_col, attr)
 
-    if sel_agent and sel_agent.get("is_teammate"):
+    if sel_agent and sel_agent.get("is_session"):
+        # Rich session detail
+        sid = sel_agent["session_id"]
+        dur = fmt_dur(sel_agent.get("started_at", ""))
+        sid_short = sid[:7]
+        cwd = sel_agent.get("cwd", "")
+        prompt_text = sel_agent.get("prompt", "")
+        tag = dir_tag(cwd)
+        header = f"{sid_short} \u00b7 {tag} session \u00b7 {dur}" if tag else f"{sid_short} \u00b7 session \u00b7 {dur}"
+        P(pr, col, header[:pw], GREEN | curses.A_BOLD)
+        pr += 1
+        P(pr, col, SYMBOLS["h"] * pw, DIM)
+        pr += 1
+
+        # Prompt
+        if prompt_text and pr < max_row:
+            display_prompt = prompt_text.replace("\n", " ").strip()
+            if display_prompt.startswith("<"):
+                display_prompt = "(system prompt)"
+            P(pr, col, display_prompt[:pw], WHITE)
+            pr += 1
+            pr += 1
+
+        # Tool event timeline
+        session_tools = cache.get("session_tools", {}).get(sid, [])
+        if session_tools and pr < max_row - 1:
+            P(pr, col, f"TOOLS  {len(session_tools)} recent", CYAN)
+            pr += 1
+            for ev in session_tools:
+                if pr >= max_row:
+                    break
+                ts = fmt_time(ev.get("created_at"))
+                name = ev["tool_name"]
+                label = ev["tool_label"]
+                tool_str = f"{name}\u2192{label}" if label and label != name else name
+                P(pr, col, f"{ts}  {tool_str}", DIM)
+                pr += 1
+            pr += 1
+
+        # Child agents
+        r_agents_list = cache.get("r_agents", [])
+        child_agents = [a for a in r_agents_list if a["session_id"] == sid]
+        if child_agents and pr < max_row - 1:
+            P(pr, col, f"AGENTS  {len(child_agents)} running", CYAN)
+            pr += 1
+            for a in child_agents:
+                if pr >= max_row:
+                    break
+                adur = fmt_dur(a["started_at"])
+                atype = a["agent_type"] or "agent"
+                aid = short_id(a["agent_id"])
+                P(pr, col, f"\u25b8 {adur:>5}  {atype}  {aid}", MAGENTA)
+                pr += 1
+
+    elif sel_agent and sel_agent.get("is_teammate"):
         # Task list for selected team member
         team_name = sel_agent.get("team_name", "")
         teammate_name = sel_agent.get("teammate_name", "")
@@ -645,40 +733,6 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, teams, top_agents
                     P(pr, col, f"{mname.ljust(name_w)}  {m_total} {task_label}  {mbar}", DIM)
                     pr += 1
                 pr += 1
-
-        # Live session activity (recent tool events from active sessions)
-        active_all = cache.get("active_all", [])
-        tool_events = cache.get("tool_events", {})
-        if active_all and pr < max_row - 2:
-            P(pr, col, "LIVE", CYAN)
-            pr += 1
-            has_content = True
-            for s in active_all:
-                if pr >= max_row:
-                    break
-                sid = s["session_id"]
-                waiting = bool(s.get("lastWaitUserAt"))
-                prompt = short_prompt(s.get("prompt"), pw - 20)
-                sid_short = short_session(sid)
-                dur = fmt_dur(s["created_at"])
-                status_icon = "\u25cb" if waiting else "\u25cf"
-                status_color = DIM if waiting else GREEN
-                P(pr, col, status_icon, status_color)
-                P(pr, col + 2, f"{dur:>5}", YELLOW)
-                P(pr, col + 8, sid_short, DIM)
-                P(pr, col + 15, prompt or "(no prompt)", DIM if waiting else WHITE)
-                pr += 1
-                # Show recent tools for this session
-                if sid in tool_events and pr < max_row:
-                    tools = tool_events[sid]
-                    parts = []
-                    for t in tools:
-                        name = t["tool_name"]
-                        label = t["tool_label"]
-                        parts.append(f"{name}\u2192{label}" if label and label != name else name)
-                    P(pr, col + 2, "\u2514 " + "  ".join(parts)[:pw - 4], DIM)
-                    pr += 1
-            pr += 1
 
         # Agent type rankings (7d)
         if top_agents and pr < max_row - 2:
@@ -830,6 +884,11 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 n_active_task_rows += 1
     teams_h = (2 + n_team_members + n_active_task_rows + n_team_subheaders) if teams else 0
 
+    # LIVE panel (tool event feed)
+    tool_feed = cache.get("tool_feed", [])
+    n_feed = min(len(tool_feed), 6)
+    live_h = (2 + n_feed) if tool_feed else 0
+
     # Sessions panel
     n_sess_rows = 0
     for s in active:
@@ -843,11 +902,12 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     sess_h = (2 + n_sess_rows) if (active or orphan_agents) else 0
 
     # History gets remaining space
-    hist_h = max(3, h - content_top - teams_h - sess_h - 1)
+    hist_h = max(3, h - content_top - teams_h - live_h - sess_h - 1)
 
     # If nothing active, show a small sessions box with idle message
     if not teams and not active and not r_agents:
         sess_h = 3
+        live_h = 0
         hist_h = max(3, h - content_top - sess_h - 1)
 
     # -- TEAMS panel --
@@ -968,6 +1028,24 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
         cr += teams_h
 
+    # -- LIVE panel (tool event feed) --
+    if tool_feed:
+        draw_box(stdscr, cr, 0, live_h, lw, title="LIVE")
+        fr = cr + 1
+        for ev in tool_feed[:n_feed]:
+            if fr >= cr + live_h - 1:
+                break
+            ts = fmt_time(ev.get("created_at"))
+            sid_short = short_session(ev["session_id"])
+            name = ev["tool_name"]
+            label = ev["tool_label"]
+            tool_str = f"{name}\u2192{label}" if label and label != name else name
+            L(fr, 2, ts, DIM)
+            L(fr, 11, sid_short, DIM)
+            L(fr, 18, tool_str[:lw - 20], YELLOW)
+            fr += 1
+        cr += live_h
+
     # -- SESSIONS panel --
     if active or orphan_agents:
         n_running = sum(
@@ -998,7 +1076,32 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             prompt = short_prompt(s.get("prompt"), max(10, lw - 32))
             spark = sparkline(activity.get(sid, []))
 
-            if waiting:
+            # Make session selectable
+            sess_item = {
+                "agent_id": sid,
+                "agent_type": "session",
+                "session_id": sid,
+                "started_at": s["created_at"],
+                "cwd": s.get("cwd", ""),
+                "is_session": True,
+                "prompt": s.get("prompt", ""),
+            }
+            vidx = len(visible_items)
+            visible_items.append(sess_item)
+            is_sel = (vidx == state.get("selected", -1))
+
+            if is_sel:
+                try:
+                    stdscr.addnstr(sr, 1, " " * (lw - 2), lw - 2, curses.A_REVERSE)
+                except curses.error:
+                    pass
+                L(sr, 2, "\u25b6", YELLOW | curses.A_REVERSE)
+                run_dur = fmt_dur(s["created_at"])
+                L(sr, 4, f"{run_dur:>6}", YELLOW | curses.A_REVERSE)
+                L(sr, 11, sid_short, DIM | curses.A_REVERSE)
+                L(sr, 18, prompt, curses.A_REVERSE | curses.A_BOLD)
+                L(sr, lw - 12, spark, DIM | curses.A_REVERSE)
+            elif waiting:
                 wait_dur = fmt_dur(s["lastWaitUserAt"])
                 L(sr, 2, "\u25cb", YELLOW)
                 L(sr, 4, f"~{wait_dur:>5}", DIM)
