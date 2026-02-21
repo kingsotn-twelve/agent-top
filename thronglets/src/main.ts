@@ -929,7 +929,7 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
     });
 
   // Dead creatures fade out
-  state.creatures.filter(c => !c.alive).forEach(c => {
+  state.creatures.filter(c => !c.alive && c.diedAt > 0).forEach(c => {
     const { x: sx, y: sy } = worldToScreen(c.x, c.y);
     ctx.fillStyle = COLORS.creatureDead;
     ctx.globalAlpha = Math.max(0, 1 - (tick - c.diedAt) / 300);
@@ -1143,7 +1143,7 @@ function main(): void {
       }
 
       state.creatures = state.creatures.filter(c =>
-        c.alive || (state.tick - c.diedAt) < 300
+        c.alive || (c.diedAt > 0 && (state.tick - c.diedAt) < 300)
       );
 
       // Tick down event log timer
