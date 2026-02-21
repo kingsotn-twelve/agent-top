@@ -173,10 +173,10 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
                    WHERE stoped_at IS NULL
                      AND (
                        created_at > datetime('now', '-5 minutes')
-                       OR (lastWaitUserAt IS NOT NULL AND lastWaitUserAt > datetime('now', '-30 minutes'))
+                       OR (lastWaitUserAt IS NOT NULL AND lastWaitUserAt > datetime('now', '-4 hours'))
                        OR session_id IN (
                          SELECT DISTINCT session_id FROM tool_event
-                         WHERE created_at > datetime('now', '-10 minutes')
+                         WHERE created_at > datetime('now', '-30 minutes')
                        )
                      )
                    GROUP BY session_id
@@ -1332,7 +1332,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         if r_agents:
             counts.append(f"{len(r_agents)} agent{'s' if len(r_agents) != 1 else ''}")
         count_str = f"  {' \u00b7 '.join(counts)}"
-        title_attr = YELLOW
+        title_attr = WHITE
     else:
         title = "   CLAUDE AGENTS"
         count_str = "  idle"
@@ -1555,9 +1555,9 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 L(sr, 18, prompt, SEL)
                 L(sr, lw - 12, spark, SEL_DIM)
             elif waiting:
-                wait_dur = fmt_dur(s["lastWaitUserAt"])
-                L(sr, 2, "\u25cb", YELLOW)
-                L(sr, 4, f"~{wait_dur:>5}", DIM)
+                total_dur = fmt_dur(s["created_at"])
+                L(sr, 2, "\u25a1", DIM)  # □ paused
+                L(sr, 4, f"{total_dur:>6}", DIM)
                 L(sr, 11, sid_short, DIM)
                 L(sr, 18, prompt, DIM)
             else:
