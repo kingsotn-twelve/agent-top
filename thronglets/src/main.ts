@@ -1300,8 +1300,8 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
 
 function drawObserver(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const obs = state.observer;
-  const pw = 220;
-  const px = w - pw - 8;
+  const pw = 200;
+  const px = w - pw - 4;
   const py = 40;
   const lineH = 14;
   const pad = 10;
@@ -1359,6 +1359,11 @@ function drawObserver(ctx: CanvasRenderingContext2D, w: number, h: number): void
   const ph = lines.length * lineH + pad * 2;
 
   // Panel background
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(px, py, pw, ph);
+  ctx.clip();
+
   ctx.fillStyle = 'rgba(8, 12, 24, 0.88)';
   ctx.fillRect(px, py, pw, ph);
   ctx.strokeStyle = 'rgba(40, 60, 120, 0.6)';
@@ -1372,15 +1377,17 @@ function drawObserver(ctx: CanvasRenderingContext2D, w: number, h: number): void
   ctx.fillStyle = '#8899cc';
   ctx.fillText('OBSERVER', px + pad, py + 11);
 
-  // Content lines
+  // Content lines — clamp text to fit panel width
+  const maxChars = Math.floor((pw - pad * 2) / 6);  // ~6px per char at 8px font
   ctx.font = '8px "Press Start 2P", monospace';
   let ly = py + 24;
   for (const line of lines) {
     if (!line.text) { ly += lineH * 0.5; continue; }
     ctx.fillStyle = line.color || '#445566';
-    ctx.fillText(line.text, px + pad, ly);
+    ctx.fillText(line.text.slice(0, maxChars), px + pad, ly);
     ly += lineH;
   }
+  ctx.restore();
 }
 
 // ── HUD ────────────────────────────────────────────────────
