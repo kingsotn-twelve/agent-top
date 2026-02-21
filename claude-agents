@@ -1176,13 +1176,49 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 P(pr, col, text, WHITE)
                 pr += 1
         else:
-            # Fallback to DB prompt
             prompt_text = sel_agent.get("prompt", "")
             if prompt_text and pr < max_row_virtual:
                 display_prompt = prompt_text.replace("\n", " ").strip()
                 if display_prompt.startswith("<"):
                     display_prompt = "(system prompt)"
                 P(pr, col, display_prompt[:pw], WHITE)
+                pr += 1
+
+        # Tool event timeline
+        session_tools = cache.get("session_tools", {}).get(sid, [])
+        if session_tools and pr < max_row_virtual:
+            pr += 1
+            P(pr, col, f"TOOLS  {len(session_tools)} recent", CYAN)
+            pr += 1
+            for ev in session_tools:
+                if pr >= max_row_virtual:
+                    break
+                ts = fmt_time(ev.get("created_at"))
+                tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
+                P(pr, col, ts, DIM)
+                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
+                pr += 1
+
+        # Child agents
+        r_agents_list = cache.get("r_agents", [])
+        c_agents_list = cache.get("c_agents", [])
+        child_running = [a for a in r_agents_list if a["session_id"] == sid]
+        child_done = [a for a in c_agents_list if a["session_id"] == sid][:5]
+        all_children = child_running + child_done
+        if all_children and pr < max_row_virtual:
+            pr += 1
+            P(pr, col, f"AGENTS  {len(all_children)}", CYAN)
+            pr += 1
+            for a in all_children:
+                if pr >= max_row_virtual:
+                    break
+                adur = fmt_dur(a["started_at"], a.get("stopped_at"))
+                atype = a["agent_type"] or "agent"
+                aid = short_id(a["agent_id"])
+                running = a in child_running
+                icon = "\u25cf" if running else "\u25cb"
+                color = MAGENTA if running else DIM
+                P(pr, col, f"{icon} {adur:>5}  {atype}  {aid}", color)
                 pr += 1
 
     elif sel_agent and sel_agent.get("is_teammate"):
