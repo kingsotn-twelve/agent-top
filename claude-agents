@@ -86,7 +86,6 @@ def query_db(db_path: str) -> dict:
         "completed_agents": [],
         "recent_prompts": [],
         "tool_events": {},  # session_id -> [{tool_name, tool_label}]
-        "tool_feed": [],  # [{session_id, tool_name, tool_label, created_at}] — recent across all sessions
         "session_tools": {},  # session_id -> [{tool_name, tool_label, created_at}] — extended list for detail view
         "top_agents": [],
         "top_tools": [],
@@ -173,18 +172,6 @@ def query_db(db_path: str) -> dict:
             if tools:
                 # Reverse so oldest is first (left-to-right reading)
                 data["tool_events"][sid] = list(reversed(tools))
-
-        # Tool feed: recent tool events across all active sessions (for LIVE panel)
-        try:
-            for row in conn.execute(
-                """SELECT session_id, tool_name, tool_label, created_at FROM tool_event
-                   WHERE created_at > datetime('now', '-5 minutes')
-                   ORDER BY created_at DESC
-                   LIMIT 8"""
-            ):
-                data["tool_feed"].append(dict(row))
-        except sqlite3.OperationalError:
-            pass
 
         # Session tools: extended tool list per active session (for DETAIL view)
         for sid in active_sids:
@@ -569,7 +556,6 @@ def refresh_data(cache: dict) -> dict:
         "c_agents": data["completed_agents"],
         "recent": data["recent_prompts"],
         "tool_events": data["tool_events"],
-        "tool_feed": data["tool_feed"],
         "session_tools": data["session_tools"],
         "activity": data["activity"],
         "team_data": team_data,
@@ -912,22 +898,22 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 n_active_task_rows += 1
     teams_h = (2 + n_team_members + n_active_task_rows + n_team_subheaders) if teams else 0
 
-    # LIVE panel (tool event feed)
-    tool_feed = cache.get("tool_feed", [])
-    n_feed = min(len(tool_feed), 6)
-    live_h = (2 + n_feed) if tool_feed else 0
-
-    # Sessions panel (flat — detail is in the DETAIL panel)
-    n_sess_rows = len(active) + len(orphan_agents)
+    # Sessions panel: each session gets 1 row + 1 inline tool row if it has recent tools
+    n_sess_rows = 0
+    for s in active:
+        n_sess_rows += 1
+        if s["session_id"] in tool_events:
+            n_sess_rows += 1  # inline tool line
+    n_sess_rows += len(orphan_agents)
     sess_h = (2 + n_sess_rows) if (active or orphan_agents) else 0
 
-    # History gets remaining space
-    hist_h = max(3, h - content_top - teams_h - live_h - sess_h - 1)
+    # History capped at 8 rows
+    max_hist = 8
+    hist_h = min(2 + max_hist, max(3, h - content_top - teams_h - sess_h - 1))
 
     # If nothing active, show a small sessions box with idle message
     if not teams and not active and not r_agents:
         sess_h = 3
-        live_h = 0
         hist_h = max(3, h - content_top - sess_h - 1)
 
     # -- TEAMS panel --
@@ -1048,32 +1034,6 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
         cr += teams_h
 
-    # -- LIVE panel (tool event feed) --
-    if tool_feed:
-        draw_box(stdscr, cr, 0, live_h, lw, title="LIVE")
-        fr = cr + 1
-        for ev in tool_feed[:n_feed]:
-            if fr >= cr + live_h - 1:
-                break
-            ts = fmt_time(ev.get("created_at"))
-            sid = ev["session_id"]
-            # Show [dirname] from the session's cwd for context
-            sess_info = session_lookup.get(sid, {})
-            tag = dir_tag(sess_info.get("cwd", ""))
-            name = ev["tool_name"]
-            label = ev["tool_label"]
-            tool_str = f"{name}\u2192{label}" if label and label != name else name
-            L(fr, 2, ts, DIM)
-            if tag:
-                L(fr, 11, tag, CYAN)
-                L(fr, 11 + len(tag) + 1, tool_str[:lw - 14 - len(tag)], YELLOW)
-            else:
-                sid_short = short_session(sid)
-                L(fr, 11, sid_short, DIM)
-                L(fr, 18, tool_str[:lw - 20], YELLOW)
-            fr += 1
-        cr += live_h
-
     # -- SESSIONS panel --
     if active or orphan_agents:
         n_running = sum(
@@ -1142,6 +1102,27 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 L(sr, 18, prompt, WHITE)
                 L(sr, lw - 12, spark, CYAN)
             sr += 1
+
+            # Inline tool line (most recent tool call for this session)
+            if sid in tool_events and sr < cr + sess_h - 1:
+                tools = tool_events[sid]
+                parts = []
+                for t in tools:
+                    name = t["tool_name"]
+                    label = t["tool_label"]
+                    parts.append(f"{name}\u2192{label}" if label and label != name else name)
+                tool_line = "  ".join(parts)[:lw - 8]
+                if is_sel:
+                    try:
+                        stdscr.addnstr(sr, 1, " " * (lw - 2), lw - 2, SEL_DIM)
+                    except curses.error:
+                        pass
+                    L(sr, 4, "\u23bf", SEL_DIM)
+                    L(sr, 6, tool_line, SEL_DIM)
+                else:
+                    L(sr, 4, "\u23bf", DIM)
+                    L(sr, 6, tool_line, DIM)
+                sr += 1
 
         # Orphan agents
         for a in orphan_agents:
