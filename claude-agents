@@ -833,10 +833,33 @@ def _draw_viz_graph(stdscr, y, x, h, w, cache, state, frame):
         prompt_text = short_prompt(p["prompt"], w - 8) or f"turn {p['seq']}"
         layers.append({"prompt": prompt_text, "agents": turn_agents, "tools": direct_tools[:3]})
 
+    # Build flat node list for hover navigation
+    graph_nodes = []  # [{type, label, detail, row, col}]
+    for li, layer in enumerate(layers):
+        graph_nodes.append({"type": "prompt", "label": layer["prompt"],
+                            "detail": f"Turn {li + 1}: {layer['prompt']}", "layer": li})
+        for a in layer["agents"]:
+            tools_str = ", ".join(a["tools"][:5]) if a["tools"] else "(no tools)"
+            graph_nodes.append({"type": "agent", "label": a["type"],
+                                "detail": f"{a['type']}: {tools_str}", "layer": li})
+            for t in a["tools"]:
+                graph_nodes.append({"type": "tool", "label": t,
+                                    "detail": t, "layer": li})
+        for t in layer["tools"]:
+            graph_nodes.append({"type": "tool", "label": t, "detail": t, "layer": li})
+    state["graph_nodes"] = graph_nodes
+
+    # Hover index
+    hover = state.get("graph_hover", 0)
+    if graph_nodes:
+        hover = max(0, min(hover, len(graph_nodes) - 1))
+        state["graph_hover"] = hover
+
     # Render top-to-bottom flow
     pr = y
     mid = x + w // 2
-    type_icons = {"session": "\u25c9", "agent": "\u25c8", "tool": "\u25cb"}
+    type_icons = {"prompt": "\u25c9", "agent": "\u25c8", "tool": "\u25cb"}
+    node_idx = 0  # tracks position in graph_nodes
 
     for li, layer in enumerate(layers):
         if pr >= y + h - 1:
@@ -845,9 +868,14 @@ def _draw_viz_graph(stdscr, y, x, h, w, cache, state, frame):
         # Prompt node (centered)
         plabel = layer["prompt"][:w - 6]
         px = mid - len(plabel) // 2 - 1
-        safe_add(stdscr, pr, px, f"\u25c9 {plabel}", rw_abs, GREEN)
+        is_hov = (node_idx == hover)
+        pcolor = (CYAN | curses.A_BOLD) if is_hov else GREEN
+        safe_add(stdscr, pr, px, f"\u25c9 {plabel}", rw_abs, pcolor)
+        if is_hov:
+            safe_add(stdscr, pr, x + 2, "\u25b6", rw_abs, CYAN)
         prompt_row = pr
         pr += 1
+        node_idx += 1
 
         # Fan-out: agents + direct tools spread horizontally
         children = []
@@ -866,39 +894,48 @@ def _draw_viz_graph(stdscr, y, x, h, w, cache, state, frame):
                     break
                 cx = start_x + ci * spacing
                 icon = type_icons.get(ctype, "\u25cb")
-                color = MAGENTA if ctype == "agent" else YELLOW
 
-                # Draw connection line from prompt
+                # Connection line from prompt
                 if prompt_row + 1 == pr:
-                    # Diagonal connector from center prompt to child position
                     if cx < mid:
-                        safe_add(stdscr, pr, cx, "\u2571", rw_abs, DIM)  # ╱
+                        safe_add(stdscr, pr, cx, "\u2571", rw_abs, DIM)
                     elif cx > mid:
-                        safe_add(stdscr, pr, cx, "\u2572", rw_abs, DIM)  # ╲
+                        safe_add(stdscr, pr, cx, "\u2572", rw_abs, DIM)
                     else:
-                        safe_add(stdscr, pr, cx, "\u2502", rw_abs, DIM)  # │
+                        safe_add(stdscr, pr, cx, "\u2502", rw_abs, DIM)
 
                 pr_child = pr + 1 if prompt_row + 1 == pr else pr
                 if pr_child < y + h:
+                    is_hov = (node_idx == hover)
+                    color = (CYAN | curses.A_BOLD) if is_hov else (MAGENTA if ctype == "agent" else YELLOW)
                     safe_add(stdscr, pr_child, cx, f"{icon} {clabel[:spacing - 3]}", rw_abs, color)
+                    if is_hov:
+                        safe_add(stdscr, pr_child, x + 2, "\u25b6", rw_abs, CYAN)
+                    node_idx += 1
 
                     # Tool leaves under agent
                     for ti, tl in enumerate(ctools):
                         if pr_child + 1 + ti >= y + h:
-                            break
+                            node_idx += 1
+                            continue
                         conn = "\u2514" if ti == len(ctools) - 1 else "\u251c"
-                        safe_add(stdscr, pr_child + 1 + ti, cx + 1, f"{conn} {tl[:spacing - 5]}", rw_abs, DIM)
+                        is_hov = (node_idx == hover)
+                        tcolor = (CYAN | curses.A_BOLD) if is_hov else DIM
+                        safe_add(stdscr, pr_child + 1 + ti, cx + 1, f"{conn} {tl[:spacing - 5]}", rw_abs, tcolor)
+                        if is_hov:
+                            safe_add(stdscr, pr_child + 1 + ti, x + 2, "\u25b6", rw_abs, CYAN)
+                        node_idx += 1
 
             pr = pr_child + 1 + max((len(c[2]) for c in children), default=0)
         else:
             pr += 1
 
-        # Convergence lines to next prompt (if not last layer)
+        # Convergence lines to next prompt
         if li < len(layers) - 1 and pr < y + h - 1:
-            safe_add(stdscr, pr, mid, "\u2502", rw_abs, DIM)  # │
+            safe_add(stdscr, pr, mid, "\u2502", rw_abs, DIM)
             pr += 1
 
-    # Legend
+    # Legend + hover info
     if pr < y + h:
         safe_add(stdscr, y + h - 1, x + 2, "\u25c9 prompt", rw_abs, GREEN)
         safe_add(stdscr, y + h - 1, x + 13, "\u25c8 agent", rw_abs, MAGENTA)
@@ -1859,15 +1896,31 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     # -- Right panel (DETAIL + LIFE) --
     if split and rw > 10:
         total_rh = h - content_top - 1
-        if sel_agent:
+        focused = state.get("focus") == "right"
+        viz_mode = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else "life"
+        graph_hovered = focused and viz_mode == "graph" and state.get("graph_nodes")
+
+        if graph_hovered:
+            # Show hovered graph node info in DETAIL
+            gn = state["graph_nodes"]
+            gh = state.get("graph_hover", 0)
+            hovered = gn[gh] if 0 <= gh < len(gn) else None
+            if hovered:
+                detail_h = 4  # compact: box + type + detail
+                draw_box(stdscr, content_top, rx, detail_h, rw, title="\u25b6 DETAIL",
+                         border_attr=CYAN)
+                type_colors = {"prompt": GREEN, "agent": MAGENTA, "tool": YELLOW}
+                color = type_colors.get(hovered["type"], DIM)
+                safe_add(stdscr, content_top + 1, rx + 2, f"{hovered['type']}: {hovered['label']}", rx + rw - 1, color)
+                safe_add(stdscr, content_top + 2, rx + 2, hovered.get("detail", "")[:rw - 4], rx + rw - 1, DIM)
+            else:
+                detail_h = 0
+        elif sel_agent:
             content_rows = _detail_content_height(sel_agent, rw - 4, cache)
-            focused = state.get("focus") == "right"
-            # When focused, cap height to allow scrolling; otherwise fit content
             detail_h = min(content_rows + 2, total_rh - 4)
             title_str = "\u25b6 DETAIL" if focused else "DETAIL"
             draw_box(stdscr, content_top, rx, detail_h, rw, title=title_str,
                      border_attr=CYAN if focused else 0)
-            # Clamp scroll to content bounds
             max_scroll = max(0, content_rows - (detail_h - 2))
             state["detail_scroll"] = min(state.get("detail_scroll", 0), max_scroll)
             scroll = state["detail_scroll"] if focused else 0
@@ -2007,14 +2060,22 @@ def main(stdscr, game_of_life=False):
                 state["selected"] = -1
         elif ch in (ord("j"), curses.KEY_DOWN):
             if state["focus"] == "right":
-                state["detail_scroll"] = state.get("detail_scroll", 0) + 1
+                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
+                if viz_m == "graph" and state.get("graph_nodes"):
+                    state["graph_hover"] = min(state.get("graph_hover", 0) + 1, len(state["graph_nodes"]) - 1)
+                else:
+                    state["detail_scroll"] = state.get("detail_scroll", 0) + 1
             else:
                 agents = state["visible_items"]
                 if agents:
                     state["selected"] = min(state["selected"] + 1, len(agents) - 1) if state["selected"] >= 0 else 0
         elif ch in (ord("k"), curses.KEY_UP):
             if state["focus"] == "right":
-                state["detail_scroll"] = max(0, state.get("detail_scroll", 0) - 1)
+                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
+                if viz_m == "graph" and state.get("graph_nodes"):
+                    state["graph_hover"] = max(0, state.get("graph_hover", 0) - 1)
+                else:
+                    state["detail_scroll"] = max(0, state.get("detail_scroll", 0) - 1)
             elif state["selected"] > 0:
                 state["selected"] -= 1
         elif ch in (ord("l"), curses.KEY_RIGHT):
