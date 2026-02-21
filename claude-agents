@@ -136,6 +136,26 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
         ):
             data["active_sessions"].append(dict(row))
 
+        # Reap orphaned agents: stopped_at IS NULL but parent session is no longer active.
+        # Grace period of 5 min avoids prematurely killing agents whose session just started.
+        _active_sids = [s["session_id"] for s in data["active_sessions"]]
+        if _active_sids:
+            _ph = ",".join("?" * len(_active_sids))
+            conn.execute(
+                f"""UPDATE agent SET stopped_at = datetime('now')
+                    WHERE stopped_at IS NULL
+                      AND started_at < datetime('now', '-5 minutes')
+                      AND session_id NOT IN ({_ph})""",
+                _active_sids,
+            )
+        else:
+            conn.execute(
+                """UPDATE agent SET stopped_at = datetime('now')
+                   WHERE stopped_at IS NULL
+                     AND started_at < datetime('now', '-5 minutes')"""
+            )
+        conn.commit()
+
         # Running agents (skip ghosts with empty type)
         for row in conn.execute(
             """SELECT agent_id, agent_type, session_id, cwd, started_at, transcript_path
