@@ -516,6 +516,169 @@ def refresh_data(cache: dict) -> dict:
     return cache
 
 
+def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, teams, top_agents, top_tools, cache):
+    """Render DETAIL content into a region defined by (pr, col) to (max_row, max_col)."""
+    pw = max_col - col  # available width
+
+    def P(r, c, text, attr=0):
+        safe_add(stdscr, r, c, text, max_col, attr)
+
+    if sel_agent and sel_agent.get("is_teammate"):
+        # Task list for selected team member
+        team_name = sel_agent.get("team_name", "")
+        teammate_name = sel_agent.get("teammate_name", "")
+        dur = fmt_dur(sel_agent.get("started_at", ""))
+        sid_short = sel_agent["agent_id"][:7]
+        header = f"{sid_short} \u00b7 {team_name}/{teammate_name} \u00b7 {dur}"
+        P(pr, col, header[:pw], CYAN | curses.A_BOLD)
+        pr += 1
+        P(pr, col, SYMBOLS["h"] * pw, DIM)
+        pr += 1
+        tasks_list = sel_agent.get("_tasks", [])
+        sorted_tasks = sorted(
+            tasks_list,
+            key=lambda t: {"in_progress": 0, "pending": 1, "completed": 2}.get(t.get("status", ""), 1),
+        )
+        if not sorted_tasks:
+            P(pr, col, "(no tasks)", DIM)
+        else:
+            t_done = sum(1 for t in sorted_tasks if t.get("status") == "completed")
+            t_active = sum(1 for t in sorted_tasks if t.get("status") == "in_progress")
+            t_blocked = sum(1 for t in sorted_tasks if t.get("status") == "pending" and t.get("blockedBy"))
+            t_total = len(sorted_tasks)
+            pbar = _progress_bar(t_done, t_active, t_total, 10)
+            pct = int(t_done / t_total * 100) if t_total else 0
+            parts = [f"{t_done} done"]
+            if t_active:
+                parts.append(f"{t_active} active")
+            if t_blocked:
+                parts.append(f"{t_blocked} blocked")
+            t_pending_unblocked = t_total - t_done - t_active - t_blocked
+            if t_pending_unblocked > 0:
+                parts.append(f"{t_pending_unblocked} pending")
+            P(pr, col, f"{pbar} {pct}%  {' \u00b7 '.join(parts)}", CYAN)
+            pr += 1
+            pr += 1  # blank line
+
+            for t in sorted_tasks:
+                if pr >= max_row:
+                    break
+                status = t.get("status", "")
+                blocked = bool(t.get("blockedBy")) and status == "pending"
+                if status == "completed":
+                    icon = "\u2713"
+                elif status == "in_progress":
+                    icon = "\u25cf"
+                elif blocked:
+                    icon = "\u2298"
+                else:
+                    icon = "\u25cb"
+                owner = t.get("owner", "")
+                owner_tag = f"  [@{owner}]" if owner else ""
+                subject = short_prompt(t.get("subject", "?"), pw - 6 - len(owner_tag))
+                if status == "completed":
+                    attr = DIM
+                elif status == "in_progress":
+                    attr = YELLOW
+                elif blocked:
+                    attr = RED
+                else:
+                    attr = WHITE
+                P(pr, col, f"{icon}  {subject}{owner_tag}", attr)
+                pr += 1
+
+    elif sel_agent:
+        # Live preview of selected subagent
+        dur = fmt_dur(sel_agent["started_at"])
+        atype = sel_agent.get("agent_type") or "agent"
+        aid = sel_agent["agent_id"][:7]
+        tag = dir_tag(sel_agent.get("cwd", ""))
+        header = f"{aid} \u00b7 {tag} {atype} \u00b7 {dur}" if tag else f"{aid} \u00b7 {atype} \u00b7 {dur}"
+        P(pr, col, header[:pw], MAGENTA | curses.A_BOLD)
+        pr += 1
+        P(pr, col, SYMBOLS["h"] * pw, DIM)
+        pr += 1
+        for line in read_preview_lines(sel_agent, max_row - pr):
+            if pr >= max_row:
+                break
+            P(pr, col, line[:pw], WHITE)
+            pr += 1
+
+    else:
+        # Stats: team metrics + agent type ranking + tool ranking
+        def _bar(val: int, max_val: int, bw: int = 8) -> str:
+            filled = int(val / max_val * bw) if max_val > 0 else 0
+            return "\u2588" * filled + "\u2591" * (bw - filled)
+
+        if teams and pr < max_row - 3:
+            for team in teams:
+                if pr >= max_row - 1:
+                    break
+                tl = team["tasks"]
+                t_done = sum(1 for t in tl if t.get("status") == "completed")
+                t_active = sum(1 for t in tl if t.get("status") == "in_progress")
+                t_pending = sum(1 for t in tl if t.get("status") == "pending")
+                t_total = len(tl)
+                P(pr, col, f"TEAMS  {team['name']}", CYAN)
+                pr += 1
+                if t_total > 0:
+                    bar = _progress_bar(t_done, t_active, t_total, 10)
+                    summary = f"{bar} {t_total} task{'s' if t_total != 1 else ''}  {t_done} done  {t_active} active  {t_pending} pending"
+                    P(pr, col, summary, DIM)
+                    pr += 1
+                pr += 1
+                name_w = max((len(m.get("teammate_name", "")) for m in team["members"]), default=0)
+                for m in team["members"]:
+                    if pr >= max_row:
+                        break
+                    mname = m.get("teammate_name", "?")
+                    m_tasks = [t for t in tl if t.get("owner") == mname]
+                    m_done = sum(1 for t in m_tasks if t.get("status") == "completed")
+                    m_active = sum(1 for t in m_tasks if t.get("status") == "in_progress")
+                    m_total = len(m_tasks)
+                    mbar = _progress_bar(m_done, m_active, m_total, 8) if m_total > 0 else "\u2591" * 8
+                    task_label = "task" if m_total == 1 else "tasks"
+                    P(pr, col, f"{mname.ljust(name_w)}  {m_total} {task_label}  {mbar}", DIM)
+                    pr += 1
+                pr += 1
+
+        P(pr, col, "AGENTS  7d", CYAN)
+        pr += 1
+        max_a = top_agents[0]["cnt"] if top_agents else 1
+        tag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_agents), default=0)
+        type_w = max((len(e["agent_type"] or "?") for e in top_agents), default=0)
+        for entry in top_agents:
+            if pr >= max_row:
+                break
+            tag = dir_tag(entry.get("cwd", ""))
+            atype = entry["agent_type"] or "?"
+            cnt = entry["cnt"]
+            bar = _bar(cnt, max_a)
+            col1 = tag.ljust(tag_w)
+            col2 = atype.ljust(type_w)
+            P(pr, col, f"{col1}  {col2}  {bar} {cnt}", DIM)
+            pr += 1
+
+        pr += 1
+        if top_tools and pr < max_row - 1:
+            P(pr, col, "TOOLS   7d", CYAN)
+            pr += 1
+            max_t = top_tools[0]["cnt"] if top_tools else 1
+            ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
+            tname_w = max((len(e["tool_name"] or "?") for e in top_tools), default=0)
+            for entry in top_tools:
+                if pr >= max_row:
+                    break
+                tag = dir_tag(entry.get("cwd", ""))
+                tname = entry["tool_name"] or "?"
+                cnt = entry["cnt"]
+                bar = _bar(cnt, max_t)
+                col1 = tag.ljust(ttag_w)
+                col2 = tname.ljust(tname_w)
+                P(pr, col, f"{col1}  {col2}  {bar} {cnt}", DIM)
+                pr += 1
+
+
 def draw(stdscr, frame: int, state: dict, cache: dict):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
@@ -897,41 +1060,52 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         L(cr + 1, 2, "no active sessions or agents", DIM)
         cr += sess_h
 
-    # -- HISTORY panel --
-    draw_box(stdscr, cr, 0, hist_h, lw, title="HISTORY")
-    hr = cr + 1
+    # -- HISTORY or DETAIL-inline panel --
+    # When something is selected and terminal is too narrow for side-by-side,
+    # show DETAIL in the HISTORY panel's space instead.
+    sel_idx = state.get("selected", -1)
+    sel_agent = visible_items[sel_idx] if 0 <= sel_idx < len(visible_items) else None
+    show_inline_detail = sel_agent is not None and not split
 
-    history = []
-    for a in c_agents:
-        history.append(("agent", a["stopped_at"], a))
-    for s in recent:
-        history.append(("prompt", s["stoped_at"], s))
-    history.sort(key=lambda x: x[1] or "", reverse=True)
-
-    if not history:
-        L(hr, 2, "(empty)", DIM)
+    if show_inline_detail:
+        draw_box(stdscr, cr, 0, hist_h, lw, title="DETAIL")
+        _draw_detail(stdscr, cr + 1, 2, cr + hist_h - 1, lw - 1,
+                     sel_agent, teams, top_agents, top_tools, cache)
     else:
-        shown = 0
-        for kind, ts, item in history:
-            if hr >= cr + hist_h - 1 or shown >= MAX_HISTORY:
-                break
-            t = fmt_time(ts)
-            if kind == "agent":
-                dur = fmt_dur(item["started_at"], item["stopped_at"])
-                atype = item.get("agent_type") or "agent"
-                L(hr, 2, t, DIM)
-                L(hr, 11, f"{dur:>6}", DIM)
-                L(hr, 18, f"\u25b8 {atype}", curses.color_pair(6))
-            else:
-                dur = fmt_dur(item["created_at"], item["stoped_at"])
-                prompt = short_prompt(item.get("prompt"), max(10, lw - 21))
-                if not prompt:
-                    continue
-                L(hr, 2, t, DIM)
-                L(hr, 11, f"{dur:>6}", DIM)
-                L(hr, 18, prompt, DIM)
-            hr += 1
-            shown += 1
+        draw_box(stdscr, cr, 0, hist_h, lw, title="HISTORY")
+        hr = cr + 1
+
+        history = []
+        for a in c_agents:
+            history.append(("agent", a["stopped_at"], a))
+        for s in recent:
+            history.append(("prompt", s["stoped_at"], s))
+        history.sort(key=lambda x: x[1] or "", reverse=True)
+
+        if not history:
+            L(hr, 2, "(empty)", DIM)
+        else:
+            shown = 0
+            for kind, ts, item in history:
+                if hr >= cr + hist_h - 1 or shown >= MAX_HISTORY:
+                    break
+                t = fmt_time(ts)
+                if kind == "agent":
+                    dur = fmt_dur(item["started_at"], item["stopped_at"])
+                    atype = item.get("agent_type") or "agent"
+                    L(hr, 2, t, DIM)
+                    L(hr, 11, f"{dur:>6}", DIM)
+                    L(hr, 18, f"\u25b8 {atype}", curses.color_pair(6))
+                else:
+                    dur = fmt_dur(item["created_at"], item["stoped_at"])
+                    prompt = short_prompt(item.get("prompt"), max(10, lw - 21))
+                    if not prompt:
+                        continue
+                    L(hr, 2, t, DIM)
+                    L(hr, 11, f"{dur:>6}", DIM)
+                    L(hr, 18, prompt, DIM)
+                hr += 1
+                shown += 1
 
     # Clamp selection to visible items
     state["visible_items"] = visible_items
@@ -940,172 +1114,12 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     else:
         state["selected"] = -1
 
-    # -- DETAIL panel (right side) --
-    sel_idx = state.get("selected", -1)
-    sel_agent = visible_items[sel_idx] if 0 <= sel_idx < len(visible_items) else None
-
+    # -- DETAIL panel (right side, or inline above) --
     if split and rw > 10:
         detail_h = h - content_top - 1
         draw_box(stdscr, content_top, rx, detail_h, rw, title="DETAIL")
-        pr = content_top + 1
-
-        if sel_agent and sel_agent.get("is_teammate"):
-            # Task list for selected team member
-            team_name = sel_agent.get("team_name", "")
-            teammate_name = sel_agent.get("teammate_name", "")
-            dur = fmt_dur(sel_agent.get("started_at", ""))
-            sid_short = sel_agent["agent_id"][:7]
-            header = f"{sid_short} \u00b7 {team_name}/{teammate_name} \u00b7 {dur}"
-            R(pr, rx + 2, header[:rw - 4], CYAN | curses.A_BOLD)
-            pr += 1
-            R(pr, rx + 2, SYMBOLS["h"] * (rw - 4), DIM)
-            pr += 1
-            tasks_list = sel_agent.get("_tasks", [])
-            sorted_tasks = sorted(
-                tasks_list,
-                key=lambda t: {"in_progress": 0, "pending": 1, "completed": 2}.get(t.get("status", ""), 1),
-            )
-            if not sorted_tasks:
-                R(pr, rx + 2, "(no tasks)", DIM)
-            else:
-                # Progress header
-                t_done = sum(1 for t in sorted_tasks if t.get("status") == "completed")
-                t_active = sum(1 for t in sorted_tasks if t.get("status") == "in_progress")
-                t_blocked = sum(1 for t in sorted_tasks if t.get("status") == "pending" and t.get("blockedBy"))
-                t_total = len(sorted_tasks)
-                pbar = _progress_bar(t_done, t_active, t_total, 10)
-                pct = int(t_done / t_total * 100) if t_total else 0
-                parts = [f"{t_done} done"]
-                if t_active:
-                    parts.append(f"{t_active} active")
-                if t_blocked:
-                    parts.append(f"{t_blocked} blocked")
-                t_pending_unblocked = t_total - t_done - t_active - t_blocked
-                if t_pending_unblocked > 0:
-                    parts.append(f"{t_pending_unblocked} pending")
-                R(pr, rx + 2, f"{pbar} {pct}%  {' \u00b7 '.join(parts)}", CYAN)
-                pr += 1
-                pr += 1  # blank line
-
-                for t in sorted_tasks:
-                    if pr >= content_top + detail_h - 1:
-                        break
-                    status = t.get("status", "")
-                    blocked = bool(t.get("blockedBy")) and status == "pending"
-                    if status == "completed":
-                        icon = "\u2713"
-                    elif status == "in_progress":
-                        icon = "\u25cf"
-                    elif blocked:
-                        icon = "\u2298"
-                    else:
-                        icon = "\u25cb"
-                    owner = t.get("owner", "")
-                    owner_tag = f"  [@{owner}]" if owner else ""
-                    subject = short_prompt(t.get("subject", "?"), rw - 10 - len(owner_tag))
-                    if status == "completed":
-                        attr = DIM
-                    elif status == "in_progress":
-                        attr = YELLOW
-                    elif blocked:
-                        attr = RED
-                    else:
-                        attr = WHITE
-                    R(pr, rx + 2, f"{icon}  {subject}{owner_tag}", attr)
-                    pr += 1
-
-        elif sel_agent:
-            # Live preview of selected subagent
-            dur = fmt_dur(sel_agent["started_at"])
-            atype = sel_agent.get("agent_type") or "agent"
-            aid = sel_agent["agent_id"][:7]
-            tag = dir_tag(sel_agent.get("cwd", ""))
-            header = f"{aid} \u00b7 {tag} {atype} \u00b7 {dur}" if tag else f"{aid} \u00b7 {atype} \u00b7 {dur}"
-            R(pr, rx + 2, header[:rw - 4], MAGENTA | curses.A_BOLD)
-            pr += 1
-            R(pr, rx + 2, SYMBOLS["h"] * (rw - 4), DIM)
-            pr += 1
-            for line in read_preview_lines(sel_agent, content_top + detail_h - pr - 1):
-                if pr >= content_top + detail_h - 1:
-                    break
-                R(pr, rx + 2, line[:rw - 4], WHITE)
-                pr += 1
-
-        else:
-            # Stats: team metrics + agent type ranking + tool ranking
-            def _bar(val: int, max_val: int, bw: int = 8) -> str:
-                filled = int(val / max_val * bw) if max_val > 0 else 0
-                return "\u2588" * filled + "\u2591" * (bw - filled)
-
-            # Team metrics (when teams exist)
-            if teams and pr < content_top + detail_h - 4:
-                for team in teams:
-                    if pr >= content_top + detail_h - 2:
-                        break
-                    tl = team["tasks"]
-                    t_done = sum(1 for t in tl if t.get("status") == "completed")
-                    t_active = sum(1 for t in tl if t.get("status") == "in_progress")
-                    t_pending = sum(1 for t in tl if t.get("status") == "pending")
-                    t_total = len(tl)
-                    R(pr, rx + 2, f"TEAMS  {team['name']}", CYAN)
-                    pr += 1
-                    if t_total > 0:
-                        bar = _progress_bar(t_done, t_active, t_total, 10)
-                        summary = f"{bar} {t_total} task{'s' if t_total != 1 else ''}  {t_done} done  {t_active} active  {t_pending} pending"
-                        R(pr, rx + 2, summary, DIM)
-                        pr += 1
-                    pr += 1  # blank line
-                    # Per-member task bars
-                    name_w = max((len(m.get("teammate_name", "")) for m in team["members"]), default=0)
-                    for m in team["members"]:
-                        if pr >= content_top + detail_h - 1:
-                            break
-                        mname = m.get("teammate_name", "?")
-                        m_tasks = [t for t in tl if t.get("owner") == mname]
-                        m_done = sum(1 for t in m_tasks if t.get("status") == "completed")
-                        m_active = sum(1 for t in m_tasks if t.get("status") == "in_progress")
-                        m_total = len(m_tasks)
-                        mbar = _progress_bar(m_done, m_active, m_total, 8) if m_total > 0 else "\u2591" * 8
-                        task_label = "task" if m_total == 1 else "tasks"
-                        R(pr, rx + 2, f"{mname.ljust(name_w)}  {m_total} {task_label}  {mbar}", DIM)
-                        pr += 1
-                    pr += 1  # gap before next section
-
-            R(pr, rx + 2, "AGENTS  7d", CYAN)
-            pr += 1
-            max_a = top_agents[0]["cnt"] if top_agents else 1
-            tag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_agents), default=0)
-            type_w = max((len(e["agent_type"] or "?") for e in top_agents), default=0)
-            for entry in top_agents:
-                if pr >= content_top + detail_h - 1:
-                    break
-                tag = dir_tag(entry.get("cwd", ""))
-                atype = entry["agent_type"] or "?"
-                cnt = entry["cnt"]
-                bar = _bar(cnt, max_a)
-                col1 = tag.ljust(tag_w)
-                col2 = atype.ljust(type_w)
-                R(pr, rx + 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
-                pr += 1
-
-            pr += 1
-            if top_tools and pr < content_top + detail_h - 2:
-                R(pr, rx + 2, "TOOLS   7d", CYAN)
-                pr += 1
-                max_t = top_tools[0]["cnt"] if top_tools else 1
-                ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
-                tname_w = max((len(e["tool_name"] or "?") for e in top_tools), default=0)
-                for entry in top_tools:
-                    if pr >= content_top + detail_h - 1:
-                        break
-                    tag = dir_tag(entry.get("cwd", ""))
-                    tname = entry["tool_name"] or "?"
-                    cnt = entry["cnt"]
-                    bar = _bar(cnt, max_t)
-                    col1 = tag.ljust(ttag_w)
-                    col2 = tname.ljust(tname_w)
-                    R(pr, rx + 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
-                    pr += 1
+        _draw_detail(stdscr, content_top + 1, rx + 2, content_top + detail_h - 1, rx + rw - 1,
+                     sel_agent, teams, top_agents, top_tools, cache)
 
     # -- Footer (full width) --
     if visible_items:
