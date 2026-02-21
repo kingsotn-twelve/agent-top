@@ -710,12 +710,12 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
 
 
 def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
-    """Hierarchical Tree: selected session's execution tree with colored nodes."""
+    """Hierarchical Tree: selected session's agents + tool timeline."""
     active_all = cache.get("active_all", [])
     r_agents = cache.get("r_agents", [])
     c_agents = cache.get("c_agents", [])
-    tool_events = cache.get("tool_events", {})
     session_tools = cache.get("session_tools", {})
+    tool_events = cache.get("tool_events", {})
     rw = x + w  # absolute right edge
 
     # Scope to selected session
@@ -725,58 +725,47 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     target_sid = sel_item.get("session_id", "") if sel_item else ""
     if not target_sid and active_all:
         target_sid = active_all[0]["session_id"]
-
-    sess = next((s for s in active_all if s["session_id"] == target_sid), None)
-    if not sess:
-        safe_add(stdscr, y + 1, x + 2, "select a session", rw, DIM)
+    if not target_sid:
+        safe_add(stdscr, y, x + 2, "select a session", rw, DIM)
         return
 
     pr = y
-    sid = sess["session_id"]
-    prompt = short_prompt(sess.get("prompt", ""), w - 10)
-    dur = fmt_dur(sess["created_at"])
-    safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", rw, GREEN)
-    pr += 1
 
-    # Child agents for THIS session
-    children = [a for a in r_agents if a["session_id"] == sid]
-    completed = [a for a in c_agents if a["session_id"] == sid][:5]
-    all_children = children + completed
-    for i, a in enumerate(all_children):
-        if pr >= y + h:
-            break
-        is_last = (i == len(all_children) - 1)
-        connector = "\u2514\u2500" if is_last else "\u251c\u2500"
-        atype = a["agent_type"] or "agent"
-        adur = fmt_dur(a["started_at"], a.get("stopped_at"))
-        running = a in children
-        color = MAGENTA if running else DIM
-        safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {adur}", rw, color)
+    # Named agents (with non-empty type) for this session
+    children = [a for a in r_agents if a["session_id"] == target_sid and a.get("agent_type")]
+    completed = [a for a in c_agents if a["session_id"] == target_sid and a.get("agent_type")][:5]
+    named_agents = children + completed
+    if named_agents:
+        safe_add(stdscr, pr, x + 2, f"AGENTS  {len(named_agents)}", rw, CYAN)
         pr += 1
-
-        # Tools: query by agent's time window from session_tools
-        s_tools = session_tools.get(sid, [])
-        a_start = a["started_at"]
-        a_end = a.get("stopped_at") or "9999-12-31"
-        agent_tools = [t for t in s_tools if a_start <= t.get("created_at", "") <= a_end][:5]
-        for j, t in enumerate(agent_tools):
+        for i, a in enumerate(named_agents):
             if pr >= y + h:
                 break
-            tconn = " " if is_last else "\u2502"
-            tlast = "\u2514" if j == len(agent_tools) - 1 else "\u251c"
-            desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-            safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", rw, YELLOW)
+            is_last = (i == len(named_agents) - 1)
+            connector = "\u2514\u2500" if is_last else "\u251c\u2500"
+            atype = a["agent_type"]
+            adur = fmt_dur(a["started_at"], a.get("stopped_at"))
+            running = a in children
+            color = MAGENTA if running else DIM
+            safe_add(stdscr, pr, x + 2, f"{connector} {atype}  {adur}", rw, color)
             pr += 1
+        pr += 1
 
-    # Direct tools (no agent) for this session
-    if not all_children:
-        tools = tool_events.get(sid, []) or session_tools.get(sid, [])[:5]
+    # Tool timeline (always show)
+    tools = session_tools.get(target_sid, []) or tool_events.get(target_sid, [])
+    if tools:
+        safe_add(stdscr, pr, x + 2, f"TOOLS  {len(tools)}", rw, CYAN)
+        pr += 1
         for t in tools:
             if pr >= y + h:
                 break
+            ts = fmt_time(t.get("created_at", ""))
             desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-            safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", rw, YELLOW)
+            safe_add(stdscr, pr, x + 2, ts, rw, DIM)
+            safe_add(stdscr, pr, x + 11, desc[:w - 14], rw, YELLOW)
             pr += 1
+    elif pr < y + h:
+        safe_add(stdscr, pr, x + 2, "(no tools)", rw, DIM)
 
 
 def _draw_viz_graph_removed():
