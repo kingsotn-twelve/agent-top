@@ -842,7 +842,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
     # Reset visible items for keyboard nav
     visible_items: list[dict] = []
-    # Track panel index ranges for border highlighting: [(y, h, first_idx, title)]
+    # Track panel index ranges for border highlighting: [(y, h, first_idx, last_idx, title)]
     panel_ranges: list[tuple] = []
 
     n_team_members = sum(len(t["members"]) for t in teams)
@@ -1026,7 +1026,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                         L(tr, base + 7, task_text, YELLOW)
                     tr += 1
 
-        panel_ranges.append((content_top, teams_h, teams_first_idx, len(visible_items) - 1))
+        panel_ranges.append((content_top, teams_h, teams_first_idx, len(visible_items) - 1, box_title))
         cr += teams_h
 
     # -- SESSIONS panel --
@@ -1158,7 +1158,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 L(sr, lw - 12, a_spark, CYAN)
             sr += 1
 
-        panel_ranges.append((cr, sess_h, sess_first_idx, len(visible_items) - 1))
+        panel_ranges.append((cr, sess_h, sess_first_idx, len(visible_items) - 1, sess_title))
         cr += sess_h
 
     elif not teams:
@@ -1265,7 +1265,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 shown += 1
 
     if len(visible_items) > hist_first_idx:
-        panel_ranges.append((cr, hist_h, hist_first_idx, len(visible_items) - 1))
+        panel_ranges.append((cr, hist_h, hist_first_idx, len(visible_items) - 1, "HISTORY"))
 
     # -- STATS panel (bottom-left, below history) --
     cr_stats = cr + hist_h
@@ -1275,7 +1275,9 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             f"[{r[0]}]" if i == state.get("stats_range", 2) else r[0]
             for i, r in enumerate(STATS_RANGES)
         )
-        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title=f"STATS  {range_tabs}")
+        stats_active = state.get("focus") == "left" and state.get("selected", -1) < 0
+        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title=f"STATS  {range_tabs}",
+                 border_attr=CYAN if stats_active else 0)
         sr = cr_stats + 1
         max_sr = cr_stats + stats_lh - 1
 
@@ -1350,9 +1352,9 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
     # Highlight the left panel that contains the selected item
     if state.get("focus") == "left" and sel_idx >= 0:
-        for py, ph, fi, li in panel_ranges:
+        for py, ph, fi, li, ptitle in panel_ranges:
             if fi <= sel_idx <= li:
-                draw_box(stdscr, py, 0, ph, lw, border_attr=CYAN)
+                draw_box(stdscr, py, 0, ph, lw, title=ptitle, border_attr=CYAN)
                 break
 
     # -- Right panel (DETAIL + LIFE) --
