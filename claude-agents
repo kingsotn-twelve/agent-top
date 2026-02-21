@@ -33,6 +33,56 @@ SYMBOLS = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": 
 BRAILLE = "⠀⠂⠄⠆⠈⠐⠒⠔⠖⠘⠠⠢⠤⠦⠨⠰⠲⠴⠶⠸⡀⡂⡄⡆⡈"
 
 GREEN = CYAN = YELLOW = DIM = MAGENTA = WHITE = RED = 0
+
+# ── TOOL NAME MAPPING ───────────────────────────────────────
+
+TOOL_NAMES = {
+    "Read": "Read file",
+    "Write": "Write file",
+    "Edit": "Edit file",
+    "Bash": "Run command",
+    "Grep": "Search code",
+    "Glob": "Find files",
+    "WebFetch": "Fetch URL",
+    "WebSearch": "Web search",
+    "AskUserQuestion": "Ask user",
+    "TaskCreate": "Create task",
+    "TaskUpdate": "Update task",
+    "TaskList": "List tasks",
+    "TaskGet": "Get task",
+    "EnterWorktree": "Create worktree",
+    "EnterPlanMode": "Enter plan mode",
+    "ExitPlanMode": "Exit plan mode",
+    "NotebookEdit": "Edit notebook",
+    "SendMessage": "Send message",
+    "TeamCreate": "Create team",
+    "Task": "Spawn agent",
+    "Skill": "Run skill",
+}
+
+VIZ_MODES = ["gantt", "tree", "graph"]
+VIZ_LABELS = {"gantt": "TIMELINE", "tree": "TREE", "graph": "GRAPH"}
+
+
+def friendly_tool(name: str, label: str = "") -> str:
+    """Return human-readable tool description."""
+    base = TOOL_NAMES.get(name, "")
+    # Handle MCP tools: mcp__server__method → Server: method
+    if not base and name.startswith("mcp__"):
+        parts = name.split("__")
+        if len(parts) >= 3:
+            server = parts[1].replace("claude_ai_", "").replace("_", " ").title()
+            method = parts[2].replace("_", " ")
+            base = f"{server}: {method}"
+    if not base:
+        base = name
+    if label and label != name:
+        # Shorten paths in labels
+        short_label = label
+        if "/" in short_label:
+            short_label = os.path.basename(short_label)
+        return f"{base}: {short_label}"
+    return base
 # Selection highlight variants (white-on-dark-gray)
 SEL = SEL_DIM = SEL_CYAN = SEL_YELLOW = SEL_GREEN = SEL_MAGENTA = 0
 BG_SEL = 236  # dark gray background
@@ -569,6 +619,280 @@ def life_render(grid, rows, cols, char_w, char_h):
     return lines
 
 
+# ── VISUALIZATION MODES ──────────────────────────────────────
+
+def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
+    """Timeline Gantt: horizontal time, vertical agent tracks with braille sparklines."""
+    active_all = cache.get("active_all", [])
+    r_agents = cache.get("r_agents", [])
+    c_agents = cache.get("c_agents", [])
+    activity = cache.get("activity", {})
+
+    # Collect all tracks: active sessions + their agents + recent completed agents
+    tracks = []
+    for s in active_all:
+        sid = s["session_id"]
+        prompt = short_prompt(s.get("prompt", ""), 15)
+        tracks.append({"id": sid, "label": prompt or sid[:6], "type": "session",
+                       "started_at": s["created_at"], "stopped_at": None, "activity": activity.get(sid, [])})
+    for a in r_agents:
+        atype = a["agent_type"] or "agent"
+        tracks.append({"id": a["agent_id"], "label": atype, "type": "agent",
+                       "started_at": a["started_at"], "stopped_at": None, "activity": activity.get(a.get("session_id", ""), [])})
+    for a in c_agents[:5]:
+        atype = a["agent_type"] or "agent"
+        tracks.append({"id": a["agent_id"], "label": atype, "type": "completed",
+                       "started_at": a["started_at"], "stopped_at": a.get("stopped_at"), "activity": []})
+
+    if not tracks:
+        safe_add(stdscr, y + 1, x + 2, "no active sessions", w, DIM)
+        return
+
+    # Time range: last 60s
+    now_utc = datetime.now(timezone.utc)
+    span_secs = 60.0
+    bar_w = w - 20  # space for label + bar
+
+    pr = y
+    type_colors = {"session": GREEN, "agent": MAGENTA, "completed": DIM}
+    for track in tracks:
+        if pr >= y + h:
+            break
+        color = type_colors.get(track["type"], DIM)
+        label = track["label"][:14].ljust(14)
+        safe_add(stdscr, pr, x + 2, label, x + w - 1, color)
+
+        # Build braille bar from activity buckets (20 buckets of 3s = 60s)
+        buckets = track["activity"]
+        spark = sparkline(buckets, bar_w // 2) if buckets else BRAILLE[0] * (bar_w // 2)
+        safe_add(stdscr, pr, x + 17, spark, x + w - 1, color)
+        pr += 1
+
+    # Time axis at bottom
+    if pr < y + h:
+        axis = f"{'-60s':^10}{'-30s':^{bar_w - 10}}{'now':>5}"
+        safe_add(stdscr, pr, x + 17, axis[:bar_w], x + w - 1, DIM)
+
+
+def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
+    """Hierarchical Tree: session execution tree with colored nodes."""
+    active_all = cache.get("active_all", [])
+    r_agents = cache.get("r_agents", [])
+    c_agents = cache.get("c_agents", [])
+    tool_events = cache.get("tool_events", {})
+    session_tools = cache.get("session_tools", {})
+
+    # Build tree: sessions -> agents -> tools
+    pr = y
+    for s in active_all:
+        if pr >= y + h:
+            break
+        sid = s["session_id"]
+        prompt = short_prompt(s.get("prompt", ""), w - 10)
+        dur = fmt_dur(s["created_at"])
+        safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", w, GREEN)
+        pr += 1
+
+        # Child agents
+        children = [a for a in r_agents if a["session_id"] == sid]
+        completed = [a for a in c_agents if a["session_id"] == sid][:3]
+        all_children = children + completed
+        for i, a in enumerate(all_children):
+            if pr >= y + h:
+                break
+            is_last = (i == len(all_children) - 1)
+            connector = "\u2514\u2500" if is_last else "\u251c\u2500"
+            atype = a["agent_type"] or "agent"
+            dur = fmt_dur(a["started_at"], a.get("stopped_at"))
+            running = a in children
+            color = MAGENTA if running else DIM
+            safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {dur}", w, color)
+            pr += 1
+
+            # Tools for this agent (from session_tools if available)
+            agent_tools = session_tools.get(a.get("session_id", ""), [])[:3]
+            for j, t in enumerate(agent_tools):
+                if pr >= y + h:
+                    break
+                tconn = " " if is_last else "\u2502"
+                tlast = "\u2514" if j == len(agent_tools) - 1 else "\u251c"
+                desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+                safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", w, YELLOW)
+                pr += 1
+
+        # Direct tools (no agent) for this session
+        if not all_children and sid in tool_events:
+            for t in tool_events[sid]:
+                if pr >= y + h:
+                    break
+                desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+                safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", w, YELLOW)
+                pr += 1
+        if pr < y + h:
+            pr += 1  # gap between sessions
+
+
+def _draw_viz_graph(stdscr, y, x, h, w, cache, state, frame):
+    """Constellation Graph: force-directed 2D graph in braille with colored nodes."""
+    active_all = cache.get("active_all", [])
+    r_agents = cache.get("r_agents", [])
+    tool_events = cache.get("tool_events", {})
+
+    # Build nodes and edges
+    nodes = []  # (label, type, x, y)
+    edges = []  # (from_idx, to_idx)
+    node_map = {}
+
+    for s in active_all:
+        sid = s["session_id"]
+        idx = len(nodes)
+        node_map[sid] = idx
+        prompt = short_prompt(s.get("prompt", ""), 8) or sid[:6]
+        nodes.append({"label": prompt, "type": "session", "x": 0.0, "y": 0.0})
+
+    for a in r_agents:
+        aid = a["agent_id"]
+        idx = len(nodes)
+        node_map[aid] = idx
+        atype = a["agent_type"] or "agent"
+        nodes.append({"label": atype[:8], "type": "agent", "x": 0.0, "y": 0.0})
+        if a["session_id"] in node_map:
+            edges.append((node_map[a["session_id"]], idx))
+
+    # Add tool nodes (unique per name per session)
+    for sid, tools in tool_events.items():
+        if sid not in node_map:
+            continue
+        seen = set()
+        for t in tools:
+            tname = t["tool_name"]
+            key = f"{sid}:{tname}"
+            if key in seen:
+                continue
+            seen.add(key)
+            idx = len(nodes)
+            node_map[key] = idx
+            nodes.append({"label": tname[:6], "type": "tool", "x": 0.0, "y": 0.0})
+            edges.append((node_map[sid], idx))
+
+    if not nodes:
+        safe_add(stdscr, y + 1, x + 2, "no data for graph", w, DIM)
+        return
+
+    # Init positions (seeded layout)
+    graph_state = state.setdefault("graph_state", {})
+    n = len(nodes)
+    if graph_state.get("n") != n:
+        random.seed(42)
+        for i, nd in enumerate(nodes):
+            nd["x"] = random.uniform(0.1, 0.9)
+            nd["y"] = random.uniform(0.1, 0.9)
+        graph_state["n"] = n
+        graph_state["positions"] = [(nd["x"], nd["y"]) for nd in nodes]
+        random.seed()
+    else:
+        for i, (px, py) in enumerate(graph_state["positions"]):
+            if i < len(nodes):
+                nodes[i]["x"] = px
+                nodes[i]["y"] = py
+
+    # Force-directed step
+    fx = [0.0] * n
+    fy = [0.0] * n
+    # Repulsion
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = nodes[i]["x"] - nodes[j]["x"]
+            dy = nodes[i]["y"] - nodes[j]["y"]
+            dist = max(0.01, (dx * dx + dy * dy) ** 0.5)
+            force = 0.005 / (dist * dist)
+            fx[i] += dx / dist * force
+            fy[i] += dy / dist * force
+            fx[j] -= dx / dist * force
+            fy[j] -= dy / dist * force
+    # Attraction along edges
+    for ei, ej in edges:
+        if ei >= n or ej >= n:
+            continue
+        dx = nodes[ej]["x"] - nodes[ei]["x"]
+        dy = nodes[ej]["y"] - nodes[ei]["y"]
+        dist = max(0.01, (dx * dx + dy * dy) ** 0.5)
+        force = dist * 0.3
+        fx[ei] += dx * force
+        fy[ei] += dy * force
+        fx[ej] -= dx * force
+        fy[ej] -= dy * force
+    # Apply forces
+    for i in range(n):
+        nodes[i]["x"] = max(0.05, min(0.95, nodes[i]["x"] + fx[i] * 0.1))
+        nodes[i]["y"] = max(0.05, min(0.95, nodes[i]["y"] + fy[i] * 0.1))
+    graph_state["positions"] = [(nd["x"], nd["y"]) for nd in nodes]
+
+    # Render to braille grid
+    char_w = w - 4
+    char_h = h - 1
+    grid_rows = char_h * 4
+    grid_cols = char_w * 2
+    grid = [[0] * grid_cols for _ in range(grid_rows)]  # 0=empty, 1=edge, 2=session, 3=agent, 4=tool
+
+    # Draw edges as lines
+    for ei, ej in edges:
+        if ei >= n or ej >= n:
+            continue
+        x1 = int(nodes[ei]["x"] * (grid_cols - 1))
+        y1 = int(nodes[ei]["y"] * (grid_rows - 1))
+        x2 = int(nodes[ej]["x"] * (grid_cols - 1))
+        y2 = int(nodes[ej]["y"] * (grid_rows - 1))
+        steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+        for s in range(steps + 1):
+            px = x1 + (x2 - x1) * s // steps
+            py = y1 + (y2 - y1) * s // steps
+            if 0 <= py < grid_rows and 0 <= px < grid_cols:
+                grid[py][px] = max(grid[py][px], 1)
+
+    # Draw nodes (overwrite edges)
+    type_val = {"session": 2, "agent": 3, "tool": 4}
+    for nd in nodes:
+        gx = int(nd["x"] * (grid_cols - 1))
+        gy = int(nd["y"] * (grid_rows - 1))
+        val = type_val.get(nd["type"], 1)
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                ny, nx = gy + dy, gx + dx
+                if 0 <= ny < grid_rows and 0 <= nx < grid_cols:
+                    grid[ny][nx] = val
+
+    # Render braille with colors
+    val_colors = {0: DIM, 1: DIM, 2: GREEN, 3: MAGENTA, 4: YELLOW}
+    pr = y
+    for cy in range(char_h):
+        if pr >= y + h:
+            break
+        cx_pos = x + 2
+        for cxi in range(char_w):
+            code = 0x2800
+            max_val = 0
+            for dy in range(4):
+                for dx in range(2):
+                    gr, gc = cy * 4 + dy, cxi * 2 + dx
+                    if gr < grid_rows and gc < grid_cols and grid[gr][gc] > 0:
+                        max_val = max(max_val, grid[gr][gc])
+                        if dx == 0:
+                            code |= 1 << [0, 1, 2, 6][dy]
+                        else:
+                            code |= 1 << [3, 4, 5, 7][dy]
+            color = val_colors.get(max_val, DIM)
+            safe_add(stdscr, pr, cx_pos, chr(code), x + w - 1, color)
+            cx_pos += 1
+        pr += 1
+
+    # Legend at bottom
+    if pr < y + h:
+        safe_add(stdscr, pr, x + 2, "\u25cf session", x + w - 1, GREEN)
+        safe_add(stdscr, pr, x + 14, "\u25cf agent", x + w - 1, MAGENTA)
+        safe_add(stdscr, pr, x + 24, "\u25cf tool", x + w - 1, YELLOW)
+
+
 def _progress_bar(done, in_progress, total, width=5):
     """Build a compact progress bar: █ for done, ▓ for in_progress, ░ for remaining."""
     if total <= 0:
@@ -707,9 +1031,7 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 if pr >= max_row_virtual:
                     break
                 ts = fmt_time(ev.get("created_at"))
-                name = ev["tool_name"]
-                label = ev["tool_label"]
-                tool_str = f"{name}\u2192{label}" if label and label != name else name
+                tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
                 P(pr, col, ts, DIM)
                 P(pr, col + 9, tool_str[:pw - 10], YELLOW)
                 pr += 1
@@ -1238,11 +1560,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             # Inline tool line (most recent tool call for this session)
             if sid in tool_events and sr < cr + sess_h - 1:
                 tools = tool_events[sid]
-                parts = []
-                for t in tools:
-                    name = t["tool_name"]
-                    label = t["tool_label"]
-                    parts.append(f"{name}\u2192{label}" if label and label != name else name)
+                parts = [friendly_tool(t["tool_name"], t.get("tool_label", "")) for t in tools]
                 tool_line = "  ".join(parts)[:lw - 8]
                 if is_sel:
                     try:
@@ -1546,14 +1864,27 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         else:
             detail_h = 0
 
-        # -- LIFE panel (below detail, or full right panel) --
-        life_y = content_top + detail_h
-        life_rh = total_rh - detail_h
-        if state.get("game_of_life") and life_rh >= 4:
-            # Welcome screen for first 5 seconds
-            life_started = state.setdefault("life_started", time.time())
-            show_welcome = (time.time() - life_started) < 5.0
+        # -- VIZ panel (below detail, or full right panel) --
+        viz_y = content_top + detail_h
+        viz_rh = total_rh - detail_h
+        if viz_rh >= 4:
+            viz_mode = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)]
+            viz_label = VIZ_LABELS[viz_mode]
+            # Show tab selector in title
+            tabs = "  ".join(f"[{VIZ_LABELS[m]}]" if m == viz_mode else VIZ_LABELS[m] for m in VIZ_MODES)
+            if state.get("game_of_life"):
+                tabs += "  LIFE"
+            draw_box(stdscr, viz_y, rx, viz_rh, rw, title=f"TAB  {tabs}")
 
+            if viz_mode == "gantt":
+                _draw_viz_gantt(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state)
+            elif viz_mode == "tree":
+                _draw_viz_tree(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state)
+            elif viz_mode == "graph":
+                _draw_viz_graph(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state, frame)
+
+        # -- Game of Life (if enabled, after viz modes via extra Tab) --
+        if state.get("game_of_life") and state.get("viz_mode", 0) >= len(VIZ_MODES) and viz_rh >= 4:
             life_sid = None
             if sel_agent and sel_agent.get("is_session"):
                 life_sid = sel_agent["session_id"]
@@ -1561,25 +1892,9 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 life_sid = active_all[0]["session_id"]
             if not life_sid:
                 life_sid = "idle"
-            if life_sid and show_welcome:
-                wy = life_y + 1
-                # Centered welcome block
-                lines_w = [
-                    ("GAME OF LIFE", CYAN | curses.A_BOLD),
-                    ("", DIM),
-                    ("Cells live, die, or spawn by neighbor count.", DIM),
-                    (f"Seed: {life_sid[:7]}", YELLOW),
-                ]
-                cy = life_y + max(0, (life_rh - len(lines_w)) // 2)
-                for text, attr in lines_w:
-                    if cy >= life_y + life_rh:
-                        break
-                    cx = rx + max(2, (rw - len(text)) // 2)
-                    safe_add(stdscr, cy, cx, text, rx + rw - 1, attr)
-                    cy += 1
-            elif life_sid:
+            if life_sid:
                 char_w = rw - 4
-                char_h = life_rh - 1
+                char_h = viz_rh - 2
                 grid_rows = char_h * 4
                 grid_cols = char_w * 2
                 life_grids = state.setdefault("life_grids", {})
@@ -1587,14 +1902,10 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                     sess_info = session_lookup.get(life_sid, {})
                     seed_str = (sess_info.get("prompt", "") or "") + life_sid
                     random.seed(hash(seed_str))
-                    life_grids[life_sid] = {
-                        "grid": life_init(grid_rows, grid_cols, 0.25),
-                        "size": (grid_rows, grid_cols),
-                        "gen": 0,
-                    }
+                    life_grids[life_sid] = {"grid": life_init(grid_rows, grid_cols, 0.25),
+                                            "size": (grid_rows, grid_cols), "gen": 0}
                     random.seed()
                 elif life_grids[life_sid]["size"] != (grid_rows, grid_cols):
-                    # Resize: crop or extend existing grid (no re-seed)
                     old_grid = life_grids[life_sid]["grid"]
                     old_r, old_c = life_grids[life_sid]["size"]
                     new_grid = [[False] * grid_cols for _ in range(grid_rows)]
@@ -1604,32 +1915,27 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                     life_grids[life_sid]["grid"] = new_grid
                     life_grids[life_sid]["size"] = (grid_rows, grid_cols)
                 lg = life_grids[life_sid]
-                for _ in range(5):  # 5 steps per frame = ~50 gen/s
+                for _ in range(5):
                     lg["grid"] = life_step(lg["grid"], grid_rows, grid_cols)
                     lg["gen"] += 1
                 alive = sum(sum(row) for row in lg["grid"])
                 if alive < 5:
-                        sess_info = session_lookup.get(life_sid, {})
-                        seed_str = (sess_info.get("prompt", "") or "") + life_sid + str(lg["gen"])
-                        random.seed(hash(seed_str))
-                        lg["grid"] = life_init(grid_rows, grid_cols, 0.25)
-                        random.seed()
-                # Seed label top-right
-                seed_label = life_sid[:7]
-                safe_add(stdscr, life_y, rx + rw - len(seed_label) - 2, seed_label, rx + rw - 1, DIM)
-                # Density -> color: sparse=dim, medium=cyan, dense=green, packed=yellow
+                    sess_info = session_lookup.get(life_sid, {})
+                    seed_str = (sess_info.get("prompt", "") or "") + life_sid + str(lg["gen"])
+                    random.seed(hash(seed_str))
+                    lg["grid"] = life_init(grid_rows, grid_cols, 0.25)
+                    random.seed()
                 _life_colors = [DIM, DIM, CYAN, CYAN, GREEN, GREEN, YELLOW, YELLOW, YELLOW]
                 lines = life_render(lg["grid"], grid_rows, grid_cols, char_w, char_h)
-                lr = life_y
+                lr = viz_y + 1
                 for row in lines:
-                    if lr >= life_y + life_rh:
+                    if lr >= viz_y + viz_rh - 1:
                         break
                     cx = rx + 2
-                    for ch, density in row:
+                    for bch, density in row:
                         if cx >= rx + rw - 1:
                             break
-                        color = _life_colors[min(density, 8)]
-                        safe_add(stdscr, lr, cx, ch, rx + rw - 1, color)
+                        safe_add(stdscr, lr, cx, bch, rx + rw - 1, _life_colors[min(density, 8)])
                         cx += 1
                     lr += 1
 
@@ -1639,13 +1945,13 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         safe_add(stdscr, h - 1, 0, f" {status}", w, YELLOW)
     elif visible_items:
         if state.get("focus") == "right":
-            safe_add(stdscr, h - 1, 0, " j/k=scroll  h=back  enter=open  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=scroll  h=back  tab=viz  enter=open  q=quit", w, DIM)
         elif state.get("selected", -1) >= 0:
-            safe_add(stdscr, h - 1, 0, " j/k=select  l/enter=detail  h/l=stats  esc=deselect  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=select  l/enter=detail  h/l=stats  tab=viz  esc=deselect  q=quit", w, DIM)
         else:
-            safe_add(stdscr, h - 1, 0, " j/k=select  h/l=stats range  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=select  h/l=stats range  tab=viz  q=quit", w, DIM)
     else:
-        safe_add(stdscr, h - 1, 0, " q=quit", w, DIM)
+        safe_add(stdscr, h - 1, 0, " tab=viz  q=quit", w, DIM)
     stdscr.refresh()
 
 
@@ -1662,7 +1968,8 @@ def main(stdscr, game_of_life=False):
     init_colors()
 
     state: dict = {"selected": -1, "visible_items": [], "status_msg": "", "status_until": 0.0,
-                   "stats_range": 2, "game_of_life": game_of_life, "focus": "left", "detail_scroll": 0}
+                   "stats_range": 2, "game_of_life": game_of_life, "focus": "left", "detail_scroll": 0,
+                   "viz_mode": 0}
     cache: dict = {}
     refresh_data(cache, state["stats_range"])
     frame = 0
@@ -1674,6 +1981,9 @@ def main(stdscr, game_of_life=False):
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q")):
             break
+        elif ch == 9:  # Tab — cycle viz mode
+            n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
+            state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
