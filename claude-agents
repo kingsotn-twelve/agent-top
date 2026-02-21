@@ -15,7 +15,10 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 VERSION = "0.8.0"
@@ -26,6 +29,7 @@ DB_PATH = os.environ.get("CLAUDE_AGENTS_DB") or os.path.expanduser("~/.claude/cc
 
 MAX_COMPLETED_AGENTS = 10
 MAX_HISTORY = 20
+CONSOLE_H = 6  # fixed height of console panel
 MAX_TOOL_EVENTS = 3  # tools shown per agentless session
 
 # ── CONSTANTS & SYMBOLS ──────────────────────────────────────
@@ -1133,6 +1137,308 @@ def draw_box(stdscr, y, x, h, w, title="", title_attr=0, border_attr=0):
     safe_add(stdscr, y + h - 1, x, bot, x + w, ba)
 
 
+# ── CONSOLE ─────────────────────────────────────────────────
+
+CONSOLE_SYSTEM_PROMPT = """You are the console for a terminal dashboard monitoring Claude Code sessions and agents.
+You have access to: SQLite database (sessions, agents, tool events, teams), file system, and shell commands (read-only).
+
+Return ONLY valid JSON:
+{{"plan": [{{"action": "sql"|"shell"|"read_file", "query"|"cmd"|"path": "..."}}], "render": {{"widget": "table"|"bar_chart"|"kv_card"|"text", "title": "...", ...}}}}
+
+Widget specs:
+- table: {{"widget":"table","title":"...","columns":["a","b"],"rows":[["x","y"]]}}
+- bar_chart: {{"widget":"bar_chart","title":"...","labels":["a","b"],"values":[1,2]}}
+- kv_card: {{"widget":"kv_card","title":"...","pairs":[["key","val"]]}}
+- text: {{"widget":"text","title":"...","body":"plain text"}}
+
+Actions: sql (query {db_path}, tables: prompt, agent, tool_event, team_session), shell (read-only: git log, ls, cat, df, etc), read_file.
+Constraints: ONLY return JSON. Never modify state. Never access .env or credentials. Shell must be read-only."""
+
+
+def draw_console(stdscr, frame: int, state: dict, y: int, w: int, cache: dict):
+    """Draw the CONSOLE panel at the bottom of the screen."""
+    ch = CONSOLE_H
+    if ch < 3 or y < 0:
+        return
+
+    draw_box(stdscr, y, 0, ch, w, "CONSOLE")
+
+    prompt_y = y + 1
+    prompt_x = 2
+    prefix = "> "
+    safe_add(stdscr, prompt_y, prompt_x, prefix, w - 1, CYAN)
+
+    input_text = state.get("console_input", "")
+    safe_add(stdscr, prompt_y, prompt_x + len(prefix), input_text[:w - 6], w - 2, WHITE)
+
+    # Blinking cursor when focused
+    if state.get("console_focus"):
+        cursor_x = prompt_x + len(prefix) + min(state.get("console_cursor", len(input_text)), w - 6)
+        if (frame % 5) < 3:
+            safe_add(stdscr, prompt_y, min(cursor_x, w - 3), "█", w - 1, CYAN)
+
+    # Response lines
+    lines = state.get("console_lines", [])
+    tq = state.get("console_typing_queue")
+    max_lines = ch - 3
+    visible = lines[-(max_lines):]
+    for i, line in enumerate(visible):
+        line_y = y + 2 + i
+        if line_y >= y + ch - 1:
+            break
+        text = line.get("text", "")
+        # Character-by-character for last line if typing
+        if tq and i == len(visible) - 1 and tq["pos"] < len(text):
+            text = text[:tq["pos"]]
+        attr = line.get("attr", DIM)
+        safe_add(stdscr, line_y, 2, text[:w - 4], w - 2, attr)
+
+
+def _handle_console_query(query: str, state: dict, cache: dict):
+    """Handle a console query. Try fast paths first, then Claude API."""
+    q = query.lower().strip()
+
+    def add_line(text, attr=WHITE):
+        state["console_lines"].append({"text": text, "attr": attr})
+        # Trigger typing effect on first line of response
+        state["console_typing_queue"] = {"text": text, "pos": 0, "attr": attr}
+
+    def add_more(text, attr=DIM):
+        state["console_lines"].append({"text": text, "attr": attr})
+
+    if q == "clear":
+        state["console_lines"] = []
+        state["console_typing_queue"] = None
+        return
+
+    if q in ("help", "?"):
+        add_line("agents | sessions | tools | history | clear", DIM)
+        add_more("or type any question (needs ANTHROPIC_API_KEY)", DIM)
+        return
+
+    if q in ("agents", "sessions"):
+        r_agents = cache.get("r_agents", [])
+        active = cache.get("active_all", [])
+        add_line(f"{len(active)} sessions, {len(r_agents)} agents", CYAN)
+        for a in r_agents[:5]:
+            atype = (a.get("agent_type") or "?")[:15]
+            dur = fmt_dur(a["started_at"])
+            add_more(f"  {atype:<15} {dur:>6}  {short_id(a['agent_id'])}")
+        return
+
+    if q == "tools":
+        top = cache.get("data", {}).get("top_tools", [])
+        if top:
+            add_line("top tools:", CYAN)
+            for t in top[:5]:
+                add_more(f"  {t['tool_name']:<20} {t['cnt']:>4}")
+        else:
+            add_line("no tool data", DIM)
+        return
+
+    if q == "history":
+        recent = cache.get("recent", [])
+        if recent:
+            add_line(f"{len(recent)} recent:", CYAN)
+            for r in recent[:5]:
+                p = short_prompt(r.get("prompt", ""), 30)
+                ts = fmt_time(r["created_at"]) if r.get("created_at") else ""
+                add_more(f"  {ts}  {p}")
+        else:
+            add_line("no history", DIM)
+        return
+
+    # Claude API
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        add_line("no ANTHROPIC_API_KEY — local only", RED)
+        add_more("try: agents, sessions, tools, history", DIM)
+        return
+
+    add_line("thinking...", DIM)
+    _console_api_call(query, state, cache, api_key)
+
+
+def _console_api_call(query: str, state: dict, cache: dict, api_key: str):
+    """Call Claude API in background thread."""
+    def _call():
+        try:
+            r_agents = cache.get("r_agents", [])
+            active = cache.get("active_all", [])
+            context = {
+                "active_sessions": len(active),
+                "running_agents": len(r_agents),
+                "agents": [{"type": a.get("agent_type"), "id": a["agent_id"][:7],
+                            "dur": fmt_dur(a["started_at"])} for a in r_agents[:10]],
+            }
+            system_prompt = CONSOLE_SYSTEM_PROMPT.replace("{db_path}", DB_PATH)
+            user_msg = f"State: {json.dumps(context)}\n\nQuery: {query}"
+            body = json.dumps({
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 1024,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_msg}],
+            }).encode()
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+
+            text_content = ""
+            for block in result.get("content", []):
+                if block.get("type") == "text":
+                    text_content += block["text"]
+
+            # Remove "thinking..." line
+            if state["console_lines"] and state["console_lines"][-1].get("text") == "thinking...":
+                state["console_lines"].pop()
+
+            _execute_console_plan(text_content, state, cache)
+        except Exception as e:
+            if state["console_lines"] and state["console_lines"][-1].get("text") == "thinking...":
+                state["console_lines"].pop()
+            state["console_lines"].append({"text": f"error: {str(e)[:60]}", "attr": RED})
+
+    threading.Thread(target=_call, daemon=True).start()
+
+
+def _execute_console_plan(response_text: str, state: dict, cache: dict):
+    """Parse Claude's JSON response, execute plan, render widget."""
+    def add_line(text, attr=WHITE):
+        state["console_lines"].append({"text": text, "attr": attr})
+        state["console_typing_queue"] = {"text": text, "pos": 0, "attr": attr}
+
+    def add_more(text, attr=DIM):
+        state["console_lines"].append({"text": text, "attr": attr})
+
+    try:
+        text = response_text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        plan = json.loads(text)
+    except json.JSONDecodeError:
+        for line in response_text.strip().split("\n")[:4]:
+            add_more(line[:80])
+        return
+
+    # Execute plan actions
+    results = []
+    for action in plan.get("plan", []):
+        act = action.get("action", "")
+        try:
+            if act == "sql":
+                q = action.get("query", "")
+                if any(kw in q.upper() for kw in ("DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE")):
+                    results.append("blocked: write query")
+                    continue
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                rows = [dict(r) for r in conn.execute(q).fetchall()]
+                conn.close()
+                results.append(rows)
+            elif act == "shell":
+                cmd = action.get("cmd", "")
+                if any(kw in cmd for kw in ("rm ", "mv ", "kill ", "> ", ">> ", "sudo")):
+                    results.append("blocked: write cmd")
+                    continue
+                out = subprocess.check_output(cmd, shell=True, timeout=5, stderr=subprocess.STDOUT)
+                results.append(out.decode(errors="replace").strip())
+            elif act == "read_file":
+                path = action.get("path", "")
+                with open(os.path.expanduser(path), "r", errors="replace") as f:
+                    results.append(f.read(4096))
+        except Exception as e:
+            results.append(f"error: {e}")
+
+    # Render widget
+    render = plan.get("render", {})
+    widget = render.get("widget", "text")
+    title = render.get("title", "")
+
+    if title:
+        add_line(title, CYAN)
+
+    if widget == "table":
+        cols = render.get("columns", [])
+        rows = render.get("rows", [])
+        if results and isinstance(results[0], list) and results[0] and not rows:
+            cols = cols or list(results[0][0].keys())
+            rows = [[str(r.get(c, "")) for c in cols] for r in results[0]]
+        if cols:
+            add_more("  ".join(f"{c:<15}" for c in cols[:4]), CYAN)
+        for row in rows[:8]:
+            add_more("  ".join(f"{str(v):<15}" for v in row[:4]))
+    elif widget == "bar_chart":
+        labels = render.get("labels", [])
+        values = render.get("values", [])
+        if results and isinstance(results[0], list):
+            for r in results[0][:8]:
+                vals = list(r.values())
+                if len(vals) >= 2:
+                    labels.append(str(vals[0]))
+                    try:
+                        values.append(int(vals[-1]))
+                    except (ValueError, TypeError):
+                        values.append(0)
+        mx = max(values) if values else 1
+        blocks = "▁▂▃▄▅▆▇█"
+        for label, val in zip(labels[:6], values[:6]):
+            bl = int(val / mx * 7) if mx > 0 else 0
+            bar = blocks[min(bl, 7)] * 8
+            add_more(f"  {bar} {val:>4}  {label[:20]}")
+    elif widget == "kv_card":
+        for k, v in render.get("pairs", [])[:6]:
+            add_more(f"  {k}: {v}")
+    else:
+        body = render.get("body", "")
+        if not body and results:
+            body = str(results[0]) if results else ""
+        for line in body.split("\n")[:6]:
+            add_more(f"  {line[:76]}")
+
+
+def _check_agent_health(state: dict, cache: dict):
+    """Check for stuck agents and surface messages to console."""
+    r_agents = cache.get("r_agents", [])
+    activity = cache.get("activity", {})
+    now = datetime.now(timezone.utc)
+    surfaced = state.get("_surfaced_agents", set())
+
+    for a in r_agents:
+        aid = a["agent_id"]
+        if aid in surfaced:
+            continue
+        buckets = activity.get(a["session_id"], [])
+        total_recent = sum(buckets) if buckets else 0
+        try:
+            started = datetime.fromisoformat(a["started_at"]).replace(tzinfo=timezone.utc)
+            running_secs = (now - started).total_seconds()
+        except Exception:
+            running_secs = 0
+
+        if running_secs > 120 and total_recent == 0:
+            atype = (a.get("agent_type") or "agent")[:15]
+            dur = fmt_dur(a["started_at"])
+            state["console_lines"].append({
+                "text": f"{atype} seems stuck ({dur}, no activity)",
+                "attr": DIM,
+            })
+            surfaced.add(aid)
+
+    running_ids = {a["agent_id"] for a in r_agents}
+    surfaced -= surfaced - running_ids
+
+
 # ── MAIN DRAW + LOOP ────────────────────────────────────────
 
 def refresh_data(cache: dict, stats_range_idx: int = 2) -> dict:
@@ -1598,14 +1904,14 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
 
     # History + Stats share remaining left-panel space
     max_hist = 8
-    remaining = max(6, h - content_top - teams_h - sess_h - 1)
+    remaining = max(6, h - content_top - teams_h - sess_h - CONSOLE_H - 1)
     hist_h = min(2 + max_hist, remaining // 2 + remaining % 2)
     stats_lh = remaining - hist_h  # left-side stats height
 
     # If nothing active, show a small sessions box with idle message
     if not teams and not active and not r_agents:
         sess_h = 3
-        remaining = max(6, h - content_top - sess_h - 1)
+        remaining = max(6, h - content_top - sess_h - CONSOLE_H - 1)
         hist_h = min(2 + max_hist, remaining // 2 + remaining % 2)
         stats_lh = remaining - hist_h
 
@@ -2216,30 +2522,43 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                     lr += 1
 
     # -- Text shimmer (CRT flicker) --
-    if frame % 3 == 0:  # ~1.6 chars/sec at 5fps
-        shimmer_row = random.randint(content_top + 1, max(content_top + 2, h - 3))
+    if frame % 3 == 0:
+        shimmer_row = random.randint(content_top + 1, max(content_top + 2, h - CONSOLE_H - 3))
         shimmer_col = random.randint(2, max(3, lw - 3))
         try:
             existing = stdscr.inch(shimmer_row, shimmer_col)
             char_only = existing & 0xFF
-            if char_only > 32:  # only shimmer visible characters
+            if char_only > 32:
                 stdscr.addch(shimmer_row, shimmer_col, char_only, DIM | curses.A_DIM)
         except curses.error:
             pass
+
+    # -- Console panel (bottom, left panel width) --
+    console_y = h - CONSOLE_H - 1
+    draw_console(stdscr, frame, state, console_y, lw, cache)
+
+    # Advance character-by-character typing
+    tq = state.get("console_typing_queue")
+    if tq and tq["pos"] < len(tq["text"]):
+        tq["pos"] += 2  # ~2 chars per frame at 5fps = ~10 chars/sec
+    elif tq:
+        state["console_typing_queue"] = None
 
     # -- Footer (full width) --
     status = state.get("status_msg", "")
     if status and time.time() < state.get("status_until", 0):
         safe_add(stdscr, h - 1, 0, f" {status}", w, YELLOW)
+    elif state.get("console_focus"):
+        safe_add(stdscr, h - 1, 0, " type query  enter=submit  esc=close  ↑=history", w, DIM)
     elif visible_items:
         if state.get("focus") == "right":
-            safe_add(stdscr, h - 1, 0, " j/k=scroll  h=back  tab=viz  enter=open  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=scroll  h=back  /=console  tab=viz  enter=open  q=quit", w, DIM)
         elif state.get("selected", -1) >= 0:
-            safe_add(stdscr, h - 1, 0, " j/k=select  l/enter=detail  h/l=stats  tab=viz  esc=deselect  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=select  l=detail  /=console  h/l=stats  esc=deselect  q=quit", w, DIM)
         else:
-            safe_add(stdscr, h - 1, 0, " j/k=select  h/l=stats range  tab=viz  q=quit", w, DIM)
+            safe_add(stdscr, h - 1, 0, " j/k=select  /=console  h/l=stats range  tab=viz  q=quit", w, DIM)
     else:
-        safe_add(stdscr, h - 1, 0, " tab=viz  q=quit", w, DIM)
+        safe_add(stdscr, h - 1, 0, " /=console  tab=viz  q=quit", w, DIM)
 
     # -- Heartbeat cursor (bottom-right) --
     n_active = len(r_agents) + len(active)
@@ -2274,7 +2593,17 @@ def main(stdscr, game_of_life=False):
                    "viz_mode": 0,
                    # Alive layer
                    "last_input_time": time.time(),
-                   "shimmer_positions": [],  # [(row, col, frame_added)]
+                   "shimmer_positions": [],
+                   # Console
+                   "console_focus": False,
+                   "console_input": "",
+                   "console_cursor": 0,
+                   "console_lines": [],      # [{"text": str, "attr": int}]
+                   "console_scroll": 0,
+                   "console_history": [],     # previous queries
+                   "console_history_idx": -1,
+                   "console_typing_queue": None,  # {"text": str, "pos": int, "attr": int}
+                   "_surfaced_agents": set(),
                    }
     cache: dict = {}
     refresh_data(cache, state["stats_range"])
@@ -2282,13 +2611,66 @@ def main(stdscr, game_of_life=False):
     while True:
         if frame % DATA_FRAMES == 0:
             refresh_data(cache, state["stats_range"])
+            _check_agent_health(state, cache)
         draw(stdscr, frame, state, cache)
         frame += 1
         ch = stdscr.getch()
         if ch != -1:
             state["last_input_time"] = time.time()
+
+        # Console input handling — must come before panel nav to consume keys
+        if state.get("console_focus") and ch != -1:
+            if ch == 27:  # Esc — unfocus console
+                state["console_focus"] = False
+            elif ch in (10, 13, curses.KEY_ENTER):
+                query = state["console_input"].strip()
+                if query:
+                    state["console_history"].append(query)
+                    state["console_history_idx"] = -1
+                    _handle_console_query(query, state, cache)
+                    state["console_input"] = ""
+                    state["console_cursor"] = 0
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                pos = state["console_cursor"]
+                if pos > 0:
+                    inp = state["console_input"]
+                    state["console_input"] = inp[:pos - 1] + inp[pos:]
+                    state["console_cursor"] = pos - 1
+            elif ch == curses.KEY_LEFT:
+                state["console_cursor"] = max(0, state["console_cursor"] - 1)
+            elif ch == curses.KEY_RIGHT:
+                state["console_cursor"] = min(len(state["console_input"]), state["console_cursor"] + 1)
+            elif ch == curses.KEY_UP:
+                hist = state["console_history"]
+                if hist:
+                    idx = state.get("console_history_idx", -1)
+                    idx = len(hist) - 1 if idx == -1 else max(0, idx - 1)
+                    state["console_history_idx"] = idx
+                    state["console_input"] = hist[idx]
+                    state["console_cursor"] = len(hist[idx])
+            elif ch == curses.KEY_DOWN:
+                hist = state["console_history"]
+                idx = state.get("console_history_idx", -1)
+                if idx >= 0 and idx < len(hist) - 1:
+                    state["console_history_idx"] = idx + 1
+                    state["console_input"] = hist[idx + 1]
+                    state["console_cursor"] = len(hist[idx + 1])
+                else:
+                    state["console_history_idx"] = -1
+                    state["console_input"] = ""
+                    state["console_cursor"] = 0
+            elif 32 <= ch <= 126:
+                pos = state["console_cursor"]
+                inp = state["console_input"]
+                state["console_input"] = inp[:pos] + chr(ch) + inp[pos:]
+                state["console_cursor"] = pos + 1
+            continue  # consume key — don't fall through to panel nav
+
         if ch in (ord("q"), ord("Q")):
             break
+        elif ch == ord("/"):
+            state["console_focus"] = True
+            state["console_cursor"] = len(state.get("console_input", ""))
         elif ch == 9:  # Tab — cycle viz mode forward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
