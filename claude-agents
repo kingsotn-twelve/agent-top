@@ -633,9 +633,12 @@ def _detail_content_height(sel_agent, pw, cache):
     if sel_agent.get("is_session"):
         rows = 2  # header + divider
         prompt = (sel_agent.get("prompt", "") or "").replace("\n", " ").strip()
-        if prompt.startswith("<"):
-            prompt = "(system prompt)"
-        rows += max(1, -(-len(prompt) // pw)) if prompt else 0  # ceil div
+        if prompt:
+            rows += 1  # prompt line
+        sid = sel_agent.get("session_id", "")
+        n_tools = len(cache.get("session_tools", {}).get(sid, []))
+        if n_tools:
+            rows += 1 + n_tools  # blank + tool lines
         return rows
     if sel_agent.get("is_teammate"):
         tasks = sel_agent.get("_tasks", [])
@@ -665,15 +668,27 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache):
         P(pr, col, SYMBOLS["h"] * pw, DIM)
         pr += 1
 
-        # Prompt (wrap long prompts)
+        # Prompt
         if prompt_text and pr < max_row:
             display_prompt = prompt_text.replace("\n", " ").strip()
             if display_prompt.startswith("<"):
                 display_prompt = "(system prompt)"
-            # Word-wrap the prompt
-            while display_prompt and pr < max_row:
-                P(pr, col, display_prompt[:pw], WHITE)
-                display_prompt = display_prompt[pw:]
+            P(pr, col, display_prompt[:pw], WHITE)
+            pr += 1
+
+        # Tool event timeline
+        session_tools = cache.get("session_tools", {}).get(sid, [])
+        if session_tools and pr < max_row:
+            pr += 1
+            for ev in session_tools:
+                if pr >= max_row:
+                    break
+                ts = fmt_time(ev.get("created_at"))
+                name = ev["tool_name"]
+                label = ev["tool_label"]
+                tool_str = f"{name}\u2192{label}" if label and label != name else name
+                P(pr, col, ts, DIM)
+                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
                 pr += 1
 
     elif sel_agent and sel_agent.get("is_teammate"):
