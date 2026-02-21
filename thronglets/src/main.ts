@@ -248,6 +248,25 @@ const state: GameState = {
 // Feature 2: Player action tracking
 const playerActions: string[] = [];
 
+// ── TAURI FILESYSTEM ARTIFACTS ─────────────────────────────
+
+async function writeFilesystemArtifact(filename: string, content: string): Promise<void> {
+  try {
+    // @ts-ignore
+    if (!window.__TAURI__) return;
+    // @ts-ignore
+    const homePath = await (window.__TAURI__ as any).path.homeDir();
+    const dir = `${homePath}/.thronglets`;
+    // Create dir if needed
+    try {
+      // @ts-ignore
+      await window.__TAURI__.fs.createDir(dir, { recursive: true });
+    } catch { /* already exists */ }
+    // @ts-ignore
+    await window.__TAURI__.fs.writeTextFile(`${dir}/${filename}`, content);
+  } catch { /* not in Tauri or fs not available */ }
+}
+
 // ── FACTORIES ──────────────────────────────────────────────
 
 function createCreature(wx: number, wy: number): Creature {
@@ -732,6 +751,30 @@ function saveWorldState(): void {
       });
     });
   };
+
+  // Also write to filesystem (Tauri only, no-ops in browser)
+  void writeFilesystemArtifact('world.json', JSON.stringify({
+    tick: state.tick,
+    population: state.creatures.filter(c => c.alive).length,
+    epoch: epochName(state.epoch ?? 0),
+    savedAt: new Date().toISOString(),
+    creatures: state.creatures.filter(c => c.alive).map(c => ({
+      id: c.id,
+      lineage: c.lineage,
+      generation: c.evolutionGeneration ?? 0,
+      hunger: Math.round(c.hunger),
+      happiness: Math.round(c.happiness),
+      recentEvents: c.eventLog?.slice(-3) ?? [],
+    })),
+  }, null, 2));
+
+  // Write observed laws
+  if (state.observedPrinciples?.length) {
+    void writeFilesystemArtifact('laws.md',
+      '# Laws of This World\n\n' +
+      state.observedPrinciples.map((p, i) => `${i + 1}. ${p}`).join('\n')
+    );
+  }
 }
 
 function loadWorldState(callback: (loaded: boolean) => void): void {
@@ -1573,6 +1616,16 @@ function updateObserver(dt: number): void {
       `lineage: ${c.lineage ?? '??'}  state: ${c.state}`,
     ];
 
+    // Tribe / lineage count — stability awareness
+    const sameLineage = state.creatures.filter(cr => cr.alive &&
+      (cr.lineage ?? '').slice(0, 2) === (nearestCreature.lineage ?? '').slice(0, 2)
+    ).length;
+    const totalPop = state.creatures.filter(cr => cr.alive).length;
+    obs.targetDetail.push(`tribe: ${sameLineage}/${totalPop} total`);
+    if ((nearestCreature.deniedCount ?? 0) > 0) {
+      obs.targetDetail.push(`${nearestCreature.deniedCount} petition(s) denied`);
+    }
+
     // Show real-agent badge if this thronglet was born from a Claude Code agent
     const agentBorn = c.eventLog?.find(e => e.includes('born as'));
     if (agentBorn) obs.targetDetail.push(`[real agent] ${agentBorn}`);
@@ -1666,6 +1719,18 @@ function updateCreature(c: Creature, dt: number): void {
     c.state = 'dying';
     // Feature 3: Drop a bone when creature dies
     state.bones.push({ x: c.x, y: c.y, age: 0 });
+    // Write death certificate to disk (Tauri only, no-ops in browser)
+    const deathCert = JSON.stringify({
+      id: c.id,
+      lineage: c.lineage,
+      generation: c.evolutionGeneration ?? 0,
+      age: Math.round(c.age),
+      cause: c.hunger <= 0 ? 'starvation' : 'unknown',
+      lastEvents: c.eventLog?.slice(-5) ?? [],
+      diedAt: new Date().toISOString(),
+      tick: state.tick,
+    }, null, 2);
+    void writeFilesystemArtifact(`deaths/${c.id?.slice(0, 7) ?? 'unknown'}.json`, deathCert);
     return;
   }
 
@@ -2183,6 +2248,12 @@ function updateHUD(): void {
   if (bonesEl) bonesEl.textContent = `Bones: ${state.resources.bones}`;
   if (simspeedEl) simspeedEl.textContent = state.paused ? 'PAUSED' : `${state.simSpeed}x`;
   if (worldtimeEl) worldtimeEl.textContent = `Day ${Math.floor(state.tick / 7200)}`;
+  const computeEl = document.getElementById('compute');
+  if (computeEl) {
+    const pct = Math.round((state.computeBudget ?? 50000) / 500);
+    computeEl.textContent = `\u{1F4A1}${pct}%`;
+    computeEl.style.color = pct > 40 ? '#44ff88' : pct > 10 ? '#ffaa44' : '#ff4444';
+  }
   // Feature 2: Player profile display
   if (profileEl) {
     profileEl.textContent = state.playerProfile ? `[ ${state.playerProfile} ]` : '';
