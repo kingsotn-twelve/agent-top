@@ -611,6 +611,24 @@ def refresh_data(cache: dict) -> dict:
     return cache
 
 
+def _detail_content_height(sel_agent, pw, cache):
+    """Estimate how many content rows DETAIL needs (excluding box borders)."""
+    if not sel_agent:
+        return 3
+    if sel_agent.get("is_session"):
+        rows = 2  # header + divider
+        prompt = (sel_agent.get("prompt", "") or "").replace("\n", " ").strip()
+        if prompt.startswith("<"):
+            prompt = "(system prompt)"
+        rows += max(1, -(-len(prompt) // pw)) if prompt else 0  # ceil div
+        return rows
+    if sel_agent.get("is_teammate"):
+        tasks = sel_agent.get("_tasks", [])
+        return 2 + (1 if not tasks else 2 + len(tasks))  # header + divider + progress + blank + tasks
+    # Agent transcript — cap preview at 8
+    return 2 + 8
+
+
 def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache):
     """Render DETAIL content into a region defined by (pr, col) to (max_row, max_col)."""
     pw = max_col - col  # available width
@@ -1283,7 +1301,8 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     if split and rw > 10:
         total_rh = h - content_top - 1
         if sel_agent:
-            detail_h = max(6, total_rh * 2 // 3)
+            content_rows = _detail_content_height(sel_agent, rw - 4, cache)
+            detail_h = min(content_rows + 2, total_rh - 4)  # +2 for box borders, leave room for Life
             draw_box(stdscr, content_top, rx, detail_h, rw, title="DETAIL")
             _draw_detail(stdscr, content_top + 1, rx + 2, content_top + detail_h - 1, rx + rw - 1,
                          sel_agent, cache)
