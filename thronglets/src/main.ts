@@ -128,6 +128,29 @@ const COLORS = {
   pollution: '#8833aa',
 } as const;
 
+// Derive a unique hue from a lineage string — visual speciation
+function lineageHue(lineage: string | undefined): number {
+  if (!lineage) return 45;
+  // Use multiple chars spread across full range for better distribution
+  let hash = 0;
+  for (let i = 0; i < lineage.length; i++) {
+    hash = ((hash << 5) - hash + lineage.charCodeAt(i)) & 0xFFFFFF;
+  }
+  const raw = Math.abs(hash) % 300; // 0-299
+  // Map to hues that contrast with green grass (avoid 90-150)
+  // 0-89 → 0-89 (red, orange, yellow)
+  // 90-149 → 210-269 (blue, indigo — skip grass)
+  // 150-299 → 270-420 mod 360 (purple, magenta, red again)
+  if (raw < 90) return raw;
+  if (raw < 150) return 210 + (raw - 90);
+  return (270 + (raw - 150)) % 360;
+}
+
+function lineageColor(lineage: string | undefined, lightness = 60): string {
+  const h = lineageHue(lineage);
+  return `hsl(${h}, 85%, ${lightness}%)`;
+}
+
 // ── GAME STATE ─────────────────────────────────────────────
 
 const state: GameState = {
@@ -183,6 +206,7 @@ function createCreature(wx: number, wy: number): Creature {
     visualEffectTimer: 0,
     targetFood: null,
     evolutionGeneration: 0,
+    lineage: Math.random().toString(36).slice(2, 6), // random 4-char lineage seed
   };
 }
 
@@ -318,11 +342,13 @@ function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, cre
   const bob = Math.sin(creature.bobPhase + tick * 0.08) * 2;
   let cy = sy + bob;
 
+  // Body color: derived from lineage (visual speciation) — darkens when unhappy
   let bodyColor: string;
   if (creature.hunger < 20 || creature.clean < 20 || creature.happiness < 20) {
-    bodyColor = COLORS.creatureSad;
+    bodyColor = lineageColor(creature.lineage, 30); // dark/sad
   } else {
-    bodyColor = creature.happiness > 70 ? COLORS.creatureHappy : COLORS.creature;
+    const lightness = 50 + (creature.happiness / 100) * 20; // 50-70% based on mood
+    bodyColor = lineageColor(creature.lineage, lightness);
   }
 
   let s = 12 + Math.min(creature.age / 200, 4);
@@ -810,8 +836,12 @@ Define the outcome. Return JSON:
         child.hunger = 60;
         child.clean = 80;
         child.happiness = 80;
-        // Copy parent event log as lineage
         child.eventLog = [...(creature.eventLog || [])];
+        // Inherit lineage with drift
+        const pLin = creature.lineage ?? Math.random().toString(36).slice(2, 6);
+        const mPos = Math.floor(Math.random() * pLin.length);
+        child.lineage = pLin.slice(0, mPos) + Math.random().toString(36).slice(2, 3) + pLin.slice(mPos + 1);
+        child.evolutionGeneration = (creature.evolutionGeneration ?? 0) + 1;
         state.creatures.push(child);
         // Feature 1: Evolve behavior for child
         void evolveChildBehavior(creature, child);
@@ -1033,8 +1063,14 @@ function updateCreature(c: Creature, dt: number): void {
       newC.hunger = 60;
       newC.clean = 80;
       newC.happiness = 80;
-      // Copy parent event log as lineage
+      // Copy parent event log
       newC.eventLog = [...(c.eventLog || [])];
+      // Inherit lineage with slight drift — one char mutates over generations
+      const parentLineage = c.lineage ?? Math.random().toString(36).slice(2, 6);
+      const mutPos = Math.floor(Math.random() * parentLineage.length);
+      const mutChar = Math.random().toString(36).slice(2, 3);
+      newC.lineage = parentLineage.slice(0, mutPos) + mutChar + parentLineage.slice(mutPos + 1);
+      newC.evolutionGeneration = (c.evolutionGeneration ?? 0) + 1;
       state.creatures.push(newC);
       // Feature 1: Evolve behavior for naturally-split child
       void evolveChildBehavior(c, newC);
@@ -1138,11 +1174,15 @@ function initWorld(): void {
       3 + Math.floor(Math.random() * (WORLD_H - 6))
     ));
   }
+  // Give each founding creature a distinct lineage seed for visual diversity
+  const foundingLineages = ['aa00', 'ff55', '77bb'];
   for (let i = 0; i < 3; i++) {
-    state.creatures.push(createCreature(
+    const c = createCreature(
       WORLD_W / 2 + (Math.random() - 0.5) * 4,
       WORLD_H / 2 + (Math.random() - 0.5) * 4
-    ));
+    );
+    c.lineage = foundingLineages[i];
+    state.creatures.push(c);
   }
   // Spawn initial food so creatures don't starve before first tree drop
   for (let i = 0; i < 3; i++) {
