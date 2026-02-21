@@ -1326,6 +1326,9 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                         random.seed(hash(seed_str))
                         lg["grid"] = life_init(grid_rows, grid_cols, 0.25)
                         random.seed()
+                # Seed label top-right
+                seed_label = life_sid[:7]
+                safe_add(stdscr, life_y, rx + rw - len(seed_label) - 2, seed_label, rx + rw - 1, DIM)
                 lines = life_render(lg["grid"], grid_rows, grid_cols, char_w, char_h)
                 lr = life_y
                 for line in lines:
@@ -1345,8 +1348,8 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     stdscr.refresh()
 
 
-RENDER_MS = 200     # redraw interval (smooth animations)
-DATA_FRAMES = 10    # refresh DB every N frames (~2s at 200ms)
+RENDER_MS = 100     # redraw interval (smooth animations)
+DATA_FRAMES = 20    # refresh DB every N frames (~2s at 100ms)
 
 
 def main(stdscr):
