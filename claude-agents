@@ -1420,15 +1420,12 @@ def main(stdscr):
                 is_history_agent = item.get("is_history") and item.get("kind") == "agent"
                 if is_agent or is_history_agent:
                     short = item["agent_id"][:7]
-                    curses.def_prog_mode()
-                    curses.endwin()
                     try:
                         err = open_agent_in_iterm2(item)
                         atype = (item.get("agent_type") or "agent")[:12]
                         state["status_msg"] = err if err else f"opened tab: {atype}-{short}"
-                    finally:
-                        stdscr.refresh()
-                        curses.reset_prog_mode()
+                    except Exception as e:
+                        state["status_msg"] = str(e)[:40]
                     state["status_until"] = time.time() + 3
 
 
