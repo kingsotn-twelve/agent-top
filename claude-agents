@@ -521,22 +521,24 @@ def life_step(grid, rows, cols):
 
 
 def life_render(grid, rows, cols, char_w, char_h):
-    """Render grid as braille strings. Each char = 2 wide × 4 tall dots."""
+    """Render grid as list of [(char, density), ...] per row. Density 0-8 = alive dots per braille cell."""
     lines = []
     for cy in range(char_h):
-        line = ""
+        row = []
         for cx in range(char_w):
             code = 0x2800
+            alive = 0
             for dy in range(4):
                 for dx in range(2):
                     gr, gc = cy * 4 + dy, cx * 2 + dx
                     if gr < rows and gc < cols and grid[gr][gc]:
+                        alive += 1
                         if dx == 0:
                             code |= 1 << [0, 1, 2, 6][dy]
                         else:
                             code |= 1 << [3, 4, 5, 7][dy]
-            line += chr(code)
-        lines.append(line)
+            row.append((chr(code), alive))
+        lines.append(row)
     return lines
 
 
@@ -1348,12 +1350,20 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 # Seed label top-right
                 seed_label = life_sid[:7]
                 safe_add(stdscr, life_y, rx + rw - len(seed_label) - 2, seed_label, rx + rw - 1, DIM)
+                # Density -> color: sparse=dim, medium=cyan, dense=green, packed=yellow
+                _life_colors = [DIM, DIM, CYAN, CYAN, GREEN, GREEN, YELLOW, YELLOW, YELLOW]
                 lines = life_render(lg["grid"], grid_rows, grid_cols, char_w, char_h)
                 lr = life_y
-                for line in lines:
+                for row in lines:
                     if lr >= life_y + life_rh:
                         break
-                    R(lr, rx + 2, line, DIM)
+                    cx = rx + 2
+                    for ch, density in row:
+                        if cx >= rx + rw - 1:
+                            break
+                        color = _life_colors[min(density, 8)]
+                        safe_add(stdscr, lr, cx, ch, rx + rw - 1, color)
+                        cx += 1
                     lr += 1
 
     # -- Footer (full width) --
