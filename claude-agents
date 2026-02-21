@@ -632,44 +632,15 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache):
         P(pr, col, SYMBOLS["h"] * pw, DIM)
         pr += 1
 
-        # Prompt
+        # Prompt (wrap long prompts)
         if prompt_text and pr < max_row:
             display_prompt = prompt_text.replace("\n", " ").strip()
             if display_prompt.startswith("<"):
                 display_prompt = "(system prompt)"
-            P(pr, col, display_prompt[:pw], WHITE)
-            pr += 1
-            pr += 1
-
-        # Tool event timeline
-        session_tools = cache.get("session_tools", {}).get(sid, [])
-        if session_tools and pr < max_row - 1:
-            P(pr, col, f"TOOLS  {len(session_tools)} recent", CYAN)
-            pr += 1
-            for ev in session_tools:
-                if pr >= max_row:
-                    break
-                ts = fmt_time(ev.get("created_at"))
-                name = ev["tool_name"]
-                label = ev["tool_label"]
-                tool_str = f"{name}\u2192{label}" if label and label != name else name
-                P(pr, col, f"{ts}  {tool_str}", DIM)
-                pr += 1
-            pr += 1
-
-        # Child agents
-        r_agents_list = cache.get("r_agents", [])
-        child_agents = [a for a in r_agents_list if a["session_id"] == sid]
-        if child_agents and pr < max_row - 1:
-            P(pr, col, f"AGENTS  {len(child_agents)} running", CYAN)
-            pr += 1
-            for a in child_agents:
-                if pr >= max_row:
-                    break
-                adur = fmt_dur(a["started_at"])
-                atype = a["agent_type"] or "agent"
-                aid = short_id(a["agent_id"])
-                P(pr, col, f"\u25b8 {adur:>5}  {atype}  {aid}", MAGENTA)
+            # Word-wrap the prompt
+            while display_prompt and pr < max_row:
+                P(pr, col, display_prompt[:pw], WHITE)
+                display_prompt = display_prompt[pw:]
                 pr += 1
 
     elif sel_agent and sel_agent.get("is_teammate"):
@@ -869,14 +840,18 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     n_sess_rows += len(orphan_agents)
     sess_h = (2 + n_sess_rows) if (active or orphan_agents) else 0
 
-    # History capped at 8 rows
+    # History + Stats share remaining left-panel space
     max_hist = 8
-    hist_h = min(2 + max_hist, max(3, h - content_top - teams_h - sess_h - 1))
+    remaining = max(6, h - content_top - teams_h - sess_h - 1)
+    hist_h = min(2 + max_hist, remaining // 2 + remaining % 2)
+    stats_lh = remaining - hist_h  # left-side stats height
 
     # If nothing active, show a small sessions box with idle message
     if not teams and not active and not r_agents:
         sess_h = 3
-        hist_h = max(3, h - content_top - sess_h - 1)
+        remaining = max(6, h - content_top - sess_h - 1)
+        hist_h = min(2 + max_hist, remaining // 2 + remaining % 2)
+        stats_lh = remaining - hist_h
 
     # -- TEAMS panel --
     cr = content_top
@@ -1228,6 +1203,75 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 hr += 1
                 shown += 1
 
+    # -- STATS panel (bottom-left, below history) --
+    cr_stats = cr + hist_h
+    if stats_lh >= 4:
+        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title="STATS")
+        sr = cr_stats + 1
+        max_sr = cr_stats + stats_lh - 1
+
+        def _bar(val: int, max_val: int, bw: int = 8) -> str:
+            filled = int(val / max_val * bw) if max_val > 0 else 0
+            return "\u2588" * filled + "\u2591" * (bw - filled)
+
+        # Team metrics
+        if teams and sr < max_sr - 2:
+            for team in teams:
+                if sr >= max_sr - 1:
+                    break
+                tl = team["tasks"]
+                t_done = sum(1 for t in tl if t.get("status") == "completed")
+                t_active = sum(1 for t in tl if t.get("status") == "in_progress")
+                t_pending = sum(1 for t in tl if t.get("status") == "pending")
+                t_total = len(tl)
+                L(sr, 2, f"TEAMS  {team['name']}", CYAN)
+                sr += 1
+                if t_total > 0:
+                    bar = _progress_bar(t_done, t_active, t_total, 10)
+                    summary = f"{bar} {t_total} task{'s' if t_total != 1 else ''}  {t_done} done  {t_active} active  {t_pending} pending"
+                    L(sr, 2, summary, DIM)
+                    sr += 1
+                sr += 1
+
+        # Agent rankings (7d)
+        if top_agents and sr < max_sr - 1:
+            L(sr, 2, "AGENTS  7d", CYAN)
+            sr += 1
+            max_a = top_agents[0]["cnt"]
+            tag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_agents), default=0)
+            type_w = max((len(e["agent_type"] or "?") for e in top_agents), default=0)
+            for entry in top_agents:
+                if sr >= max_sr:
+                    break
+                tag = dir_tag(entry.get("cwd", ""))
+                atype = entry["agent_type"] or "?"
+                cnt = entry["cnt"]
+                bar = _bar(cnt, max_a)
+                col1 = tag.ljust(tag_w)
+                col2 = atype.ljust(type_w)
+                L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
+                sr += 1
+            sr += 1
+
+        # Tool rankings (7d)
+        if top_tools and sr < max_sr - 1:
+            L(sr, 2, "TOOLS   7d", CYAN)
+            sr += 1
+            max_t = top_tools[0]["cnt"]
+            ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
+            tname_w = max((len(e["tool_name"] or "?") for e in top_tools), default=0)
+            for entry in top_tools:
+                if sr >= max_sr:
+                    break
+                tag = dir_tag(entry.get("cwd", ""))
+                tname = entry["tool_name"] or "?"
+                cnt = entry["cnt"]
+                bar = _bar(cnt, max_t)
+                col1 = tag.ljust(ttag_w)
+                col2 = tname.ljust(tname_w)
+                L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
+                sr += 1
+
     # Clamp selection to visible items
     state["visible_items"] = visible_items
     if visible_items:
@@ -1235,139 +1279,60 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
     else:
         state["selected"] = -1
 
-    # -- Right panel (DETAIL + STATS) --
+    # -- Right panel (DETAIL + LIFE) --
     if split and rw > 10:
         total_rh = h - content_top - 1
-        # When something is selected, split right panel: DETAIL top, STATS bottom
-        # When nothing selected, STATS takes full panel
         if sel_agent:
-            detail_h = max(6, total_rh // 2)
-            stats_h = total_rh - detail_h
+            detail_h = max(6, total_rh * 2 // 3)
             draw_box(stdscr, content_top, rx, detail_h, rw, title="DETAIL")
             _draw_detail(stdscr, content_top + 1, rx + 2, content_top + detail_h - 1, rx + rw - 1,
                          sel_agent, cache)
-            stats_y = content_top + detail_h
         else:
             detail_h = 0
-            stats_h = total_rh
-            stats_y = content_top
 
-        # STATS panel (always visible)
-        if stats_h > 3:
-            draw_box(stdscr, stats_y, rx, stats_h, rw, title="STATS")
-            sr = stats_y + 1
-            max_sr = stats_y + stats_h - 1
-
-            def _bar(val: int, max_val: int, bw: int = 8) -> str:
-                filled = int(val / max_val * bw) if max_val > 0 else 0
-                return "\u2588" * filled + "\u2591" * (bw - filled)
-
-            # Team metrics
-            if teams and sr < max_sr - 2:
-                for team in teams:
-                    if sr >= max_sr - 1:
-                        break
-                    tl = team["tasks"]
-                    t_done = sum(1 for t in tl if t.get("status") == "completed")
-                    t_active = sum(1 for t in tl if t.get("status") == "in_progress")
-                    t_pending = sum(1 for t in tl if t.get("status") == "pending")
-                    t_total = len(tl)
-                    R(sr, rx + 2, f"TEAMS  {team['name']}", CYAN)
-                    sr += 1
-                    if t_total > 0:
-                        bar = _progress_bar(t_done, t_active, t_total, 10)
-                        summary = f"{bar} {t_total} task{'s' if t_total != 1 else ''}  {t_done} done  {t_active} active  {t_pending} pending"
-                        R(sr, rx + 2, summary, DIM)
-                        sr += 1
-                    sr += 1
-
-            # Agent rankings (7d)
-            if top_agents and sr < max_sr - 1:
-                R(sr, rx + 2, "AGENTS  7d", CYAN)
-                sr += 1
-                max_a = top_agents[0]["cnt"]
-                tag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_agents), default=0)
-                type_w = max((len(e["agent_type"] or "?") for e in top_agents), default=0)
-                for entry in top_agents:
-                    if sr >= max_sr:
-                        break
-                    tag = dir_tag(entry.get("cwd", ""))
-                    atype = entry["agent_type"] or "?"
-                    cnt = entry["cnt"]
-                    bar = _bar(cnt, max_a)
-                    col1 = tag.ljust(tag_w)
-                    col2 = atype.ljust(type_w)
-                    R(sr, rx + 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
-                    sr += 1
-                sr += 1
-
-            # Tool rankings (7d)
-            if top_tools and sr < max_sr - 1:
-                R(sr, rx + 2, "TOOLS   7d", CYAN)
-                sr += 1
-                max_t = top_tools[0]["cnt"]
-                ttag_w = max((len(dir_tag(e.get("cwd", ""))) for e in top_tools), default=0)
-                tname_w = max((len(e["tool_name"] or "?") for e in top_tools), default=0)
-                for entry in top_tools:
-                    if sr >= max_sr:
-                        break
-                    tag = dir_tag(entry.get("cwd", ""))
-                    tname = entry["tool_name"] or "?"
-                    cnt = entry["cnt"]
-                    bar = _bar(cnt, max_t)
-                    col1 = tag.ljust(ttag_w)
-                    col2 = tname.ljust(tname_w)
-                    R(sr, rx + 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
-                    sr += 1
-
-            # -- LIFE panel (below stats, if room) --
-            life_remaining = max_sr - sr - 1
-            if life_remaining >= 4 and active_all:
-                # Pick session: selected session, or first active
-                life_sid = None
-                if sel_agent and sel_agent.get("is_session"):
-                    life_sid = sel_agent["session_id"]
-                if not life_sid and active_all:
-                    life_sid = active_all[0]["session_id"]
-                if life_sid:
-                    sr += 1
-                    char_w = rw - 4
-                    char_h = life_remaining - 1
-                    grid_rows = char_h * 4
-                    grid_cols = char_w * 2
-                    # Init or step the life grid (stored in state per session)
-                    life_grids = state.setdefault("life_grids", {})
-                    if life_sid not in life_grids or life_grids[life_sid]["size"] != (grid_rows, grid_cols):
-                        # Seed from session prompt hash
+        # -- LIFE panel (below detail, or full right panel) --
+        life_y = content_top + detail_h
+        life_rh = total_rh - detail_h
+        if life_rh >= 4 and active_all:
+            life_sid = None
+            if sel_agent and sel_agent.get("is_session"):
+                life_sid = sel_agent["session_id"]
+            if not life_sid and active_all:
+                life_sid = active_all[0]["session_id"]
+            if life_sid:
+                char_w = rw - 4
+                char_h = life_rh - 1
+                grid_rows = char_h * 4
+                grid_cols = char_w * 2
+                life_grids = state.setdefault("life_grids", {})
+                if life_sid not in life_grids or life_grids[life_sid]["size"] != (grid_rows, grid_cols):
+                    sess_info = session_lookup.get(life_sid, {})
+                    seed_str = (sess_info.get("prompt", "") or "") + life_sid
+                    random.seed(hash(seed_str))
+                    life_grids[life_sid] = {
+                        "grid": life_init(grid_rows, grid_cols, 0.25),
+                        "size": (grid_rows, grid_cols),
+                        "gen": 0,
+                    }
+                    random.seed()
+                lg = life_grids[life_sid]
+                if frame % 3 == 0:
+                    lg["grid"] = life_step(lg["grid"], grid_rows, grid_cols)
+                    lg["gen"] += 1
+                    alive = sum(sum(row) for row in lg["grid"])
+                    if alive < 5:
                         sess_info = session_lookup.get(life_sid, {})
-                        seed_str = (sess_info.get("prompt", "") or "") + life_sid
+                        seed_str = (sess_info.get("prompt", "") or "") + life_sid + str(lg["gen"])
                         random.seed(hash(seed_str))
-                        life_grids[life_sid] = {
-                            "grid": life_init(grid_rows, grid_cols, 0.25),
-                            "size": (grid_rows, grid_cols),
-                            "gen": 0,
-                        }
-                        random.seed()  # restore entropy
-                    lg = life_grids[life_sid]
-                    # Step every 3 frames (~600ms)
-                    if frame % 3 == 0:
-                        lg["grid"] = life_step(lg["grid"], grid_rows, grid_cols)
-                        lg["gen"] += 1
-                        # Re-seed if stale (< 5 alive cells)
-                        alive = sum(sum(row) for row in lg["grid"])
-                        if alive < 5:
-                            sess_info = session_lookup.get(life_sid, {})
-                            seed_str = (sess_info.get("prompt", "") or "") + life_sid + str(lg["gen"])
-                            random.seed(hash(seed_str))
-                            lg["grid"] = life_init(grid_rows, grid_cols, 0.25)
-                            random.seed()
-                    # Render
-                    lines = life_render(lg["grid"], grid_rows, grid_cols, char_w, char_h)
-                    for line in lines:
-                        if sr >= max_sr:
-                            break
-                        R(sr, rx + 2, line, DIM)
-                        sr += 1
+                        lg["grid"] = life_init(grid_rows, grid_cols, 0.25)
+                        random.seed()
+                lines = life_render(lg["grid"], grid_rows, grid_cols, char_w, char_h)
+                lr = life_y
+                for line in lines:
+                    if lr >= life_y + life_rh:
+                        break
+                    R(lr, rx + 2, line, DIM)
+                    lr += 1
 
     # -- Footer (full width) --
     status = state.get("status_msg", "")
