@@ -440,67 +440,6 @@ function setupInput(canvas: HTMLCanvasElement): void {
   });
 }
 
-// ── BOOT SCREEN ────────────────────────────────────────────
-
-function drawBootScreen(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, callback: () => void): void {
-  const w = canvas.width;
-  const h = canvas.height;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, w, h);
-
-  const lines = [
-    'TUCKERSOFT SYSTEMS (C) 1994',
-    '',
-    'LOADING THRONGLETS V1.0',
-    '========================',
-    '',
-    'INITIALIZING BIOME...',
-    'SEEDING POPULATION...',
-    'CALIBRATING NURTURE PROTOCOLS...',
-    '',
-    'READY.',
-    '',
-    '> RUN THRONGLETS.EXE',
-  ];
-
-  let lineIdx = 0;
-  let charIdx = 0;
-
-  function typeLine(): void {
-    if (lineIdx >= lines.length) {
-      setTimeout(callback, 800);
-      return;
-    }
-
-    const line = lines[lineIdx];
-    if (charIdx <= line.length) {
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, h);
-      ctx.font = '14px "Press Start 2P", monospace';
-      ctx.fillStyle = '#00ff00';
-
-      for (let i = 0; i < lineIdx; i++) {
-        ctx.fillText(lines[i], 20, 40 + i * 24);
-      }
-      ctx.fillText(line.substring(0, charIdx), 20, 40 + lineIdx * 24);
-
-      if (Math.floor(Date.now() / 500) % 2 === 0) {
-        const cursorX = 20 + charIdx * 9.5;
-        ctx.fillRect(cursorX, 40 + lineIdx * 24 - 12, 10, 14);
-      }
-
-      charIdx++;
-      setTimeout(typeLine, 30 + Math.random() * 40);
-    } else {
-      lineIdx++;
-      charIdx = 0;
-      setTimeout(typeLine, line === '' ? 100 : 200);
-    }
-  }
-
-  typeLine();
-}
-
 // ── MAIN ───────────────────────────────────────────────────
 
 function main(): void {
@@ -514,21 +453,10 @@ function main(): void {
   resize();
   window.addEventListener('resize', resize);
 
-  // Click or press any key to skip boot screen
-  let booting = true;
-  const skipBoot = () => {
-    if (!booting) return;
-    booting = false;
-    initWorld();
-    setupInput(canvas);
-    startGame();
-  };
-  canvas.addEventListener('click', skipBoot, { once: true });
-  document.addEventListener('keydown', skipBoot, { once: true });
+  initWorld();
+  setupInput(canvas);
 
-  drawBootScreen(ctx, canvas, skipBoot);
-
-  function startGame() {
+  {
 
     let lastTime = performance.now();
 
