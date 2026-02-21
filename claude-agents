@@ -1275,9 +1275,8 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             f"[{r[0]}]" if i == state.get("stats_range", 2) else r[0]
             for i, r in enumerate(STATS_RANGES)
         )
-        stats_active = state.get("focus") == "left" and state.get("selected", -1) < 0
-        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title=f"STATS  {range_tabs}",
-                 border_attr=CYAN if stats_active else 0)
+        stats_first_idx = len(visible_items)
+        draw_box(stdscr, cr_stats, 0, stats_lh, lw, title=f"STATS  {range_tabs}")
         sr = cr_stats + 1
         max_sr = cr_stats + stats_lh - 1
 
@@ -1304,7 +1303,7 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                     sr += 1
                 sr += 1
 
-        # Agent rankings (7d)
+        # Agent rankings
         if top_agents and sr < max_sr - 1:
             L(sr, 2, f"AGENTS  {range_label}", CYAN)
             sr += 1
@@ -1320,11 +1319,24 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 bar = _bar(cnt, max_a)
                 col1 = tag.ljust(tag_w)
                 col2 = atype.ljust(type_w)
-                L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
+                stat_item = {"agent_id": atype, "agent_type": atype, "session_id": "",
+                             "started_at": "", "cwd": entry.get("cwd", ""), "is_stat": True,
+                             "stat_kind": "agent", "stat_count": cnt, "stat_label": f"{tag} {atype}"}
+                vidx = len(visible_items)
+                visible_items.append(stat_item)
+                is_sel = (vidx == state.get("selected", -1))
+                if is_sel:
+                    try:
+                        stdscr.addnstr(sr, 1, " " * (lw - 2), lw - 2, SEL_DIM)
+                    except curses.error:
+                        pass
+                    L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", SEL)
+                else:
+                    L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
                 sr += 1
             sr += 1
 
-        # Tool rankings (7d)
+        # Tool rankings
         if top_tools and sr < max_sr - 1:
             L(sr, 2, f"TOOLS   {range_label}", CYAN)
             sr += 1
@@ -1340,8 +1352,25 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
                 bar = _bar(cnt, max_t)
                 col1 = tag.ljust(ttag_w)
                 col2 = tname.ljust(tname_w)
-                L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
+                stat_item = {"agent_id": tname, "agent_type": tname, "session_id": "",
+                             "started_at": "", "cwd": entry.get("cwd", ""), "is_stat": True,
+                             "stat_kind": "tool", "stat_count": cnt, "stat_label": f"{tag} {tname}"}
+                vidx = len(visible_items)
+                visible_items.append(stat_item)
+                is_sel = (vidx == state.get("selected", -1))
+                if is_sel:
+                    try:
+                        stdscr.addnstr(sr, 1, " " * (lw - 2), lw - 2, SEL_DIM)
+                    except curses.error:
+                        pass
+                    L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", SEL)
+                else:
+                    L(sr, 2, f"{col1}  {col2}  {bar} {cnt}", DIM)
                 sr += 1
+
+        if len(visible_items) > stats_first_idx:
+            stats_title = f"STATS  {range_tabs}"
+            panel_ranges.append((cr_stats, stats_lh, stats_first_idx, len(visible_items) - 1, stats_title))
 
     # Clamp selection to visible items
     state["visible_items"] = visible_items
