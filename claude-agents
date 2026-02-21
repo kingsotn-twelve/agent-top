@@ -681,6 +681,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     c_agents = cache.get("c_agents", [])
     tool_events = cache.get("tool_events", {})
     session_tools = cache.get("session_tools", {})
+    rw = x + w  # absolute right edge
 
     # Build tree: sessions -> agents -> tools
     pr = y
@@ -690,7 +691,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         sid = s["session_id"]
         prompt = short_prompt(s.get("prompt", ""), w - 10)
         dur = fmt_dur(s["created_at"])
-        safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", w, GREEN)
+        safe_add(stdscr, pr, x + 2, f"\u25cf {dur:>5}  {prompt}", rw, GREEN)
         pr += 1
 
         # Child agents
@@ -706,7 +707,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
             dur = fmt_dur(a["started_at"], a.get("stopped_at"))
             running = a in children
             color = MAGENTA if running else DIM
-            safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {dur}", w, color)
+            safe_add(stdscr, pr, x + 4, f"{connector} {atype}  {dur}", rw, color)
             pr += 1
 
             # Tools for this agent (from session_tools if available)
@@ -717,7 +718,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
                 tconn = " " if is_last else "\u2502"
                 tlast = "\u2514" if j == len(agent_tools) - 1 else "\u251c"
                 desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-                safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", w, YELLOW)
+                safe_add(stdscr, pr, x + 6, f"{tconn}  {tlast} {desc[:w - 14]}", rw, YELLOW)
                 pr += 1
 
         # Direct tools (no agent) for this session
@@ -726,7 +727,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
                 if pr >= y + h:
                     break
                 desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-                safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", w, YELLOW)
+                safe_add(stdscr, pr, x + 4, f"\u2514 {desc[:w - 10]}", rw, YELLOW)
                 pr += 1
         if pr < y + h:
             pr += 1  # gap between sessions
@@ -1877,11 +1878,11 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
             draw_box(stdscr, viz_y, rx, viz_rh, rw, title=f"TAB  {tabs}")
 
             if viz_mode == "gantt":
-                _draw_viz_gantt(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state)
+                _draw_viz_gantt(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state)
             elif viz_mode == "tree":
-                _draw_viz_tree(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state)
+                _draw_viz_tree(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state)
             elif viz_mode == "graph":
-                _draw_viz_graph(stdscr, viz_y + 1, rx, viz_rh - 2, rx + rw, cache, state, frame)
+                _draw_viz_graph(stdscr, viz_y + 1, rx, viz_rh - 2, rw, cache, state, frame)
 
         # -- Game of Life (if enabled, after viz modes via extra Tab) --
         if state.get("game_of_life") and state.get("viz_mode", 0) >= len(VIZ_MODES) and viz_rh >= 4:
@@ -1981,9 +1982,12 @@ def main(stdscr, game_of_life=False):
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q")):
             break
-        elif ch == 9:  # Tab — cycle viz mode
+        elif ch == 9:  # Tab — cycle viz mode forward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
+        elif ch == 353:  # Shift-Tab — cycle viz mode backward
+            n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
+            state["viz_mode"] = (state["viz_mode"] - 1) % n_modes
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
