@@ -25,6 +25,24 @@ interface Creature {
   animFrame: number;
   size: number;
   bobPhase: number;
+  // LLM outcome fields
+  id?: string;
+  eventLog?: string[];
+  visualEffect?: string;
+  visualEffectTimer?: number;
+  // food-seeking
+  targetFood?: FoodItem | null;
+}
+
+interface FoodItem {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  vz: number;   // vertical velocity (world-space Z / height)
+  z: number;    // current height above ground
+  eaten: boolean;
+  spawnedAt: number;
 }
 
 interface Tree {
@@ -40,12 +58,15 @@ type ToolType = 'feed' | 'clean' | 'play' | 'chop';
 interface GameState {
   creatures: Creature[];
   trees: Tree[];
+  food: FoodItem[];
   resources: { wood: number; gems: number };
   tool: ToolType;
   tick: number;
   camera: { x: number; y: number };
   mouseWorld: { x: number; y: number };
   mouseScreen: { x: number; y: number };
+  lastEvent: string;
+  lastEventTimer: number;
 }
 
 // ── CONSTANTS ──────────────────────────────────────────────
@@ -73,12 +94,15 @@ const COLORS = {
 const state: GameState = {
   creatures: [],
   trees: [],
+  food: [],
   resources: { wood: 0, gems: 0 },
   tool: 'feed',
   tick: 0,
   camera: { x: 0, y: 0 },
   mouseWorld: { x: 0, y: 0 },
   mouseScreen: { x: 0, y: 0 },
+  lastEvent: '',
+  lastEventTimer: 0,
 };
 
 // ── FACTORIES ──────────────────────────────────────────────
@@ -90,11 +114,29 @@ function createCreature(wx: number, wy: number): Creature {
     age: 0, alive: true, diedAt: 0, splitTimer: 0,
     state: 'idle', stateTimer: 0, animFrame: 0,
     size: 1, bobPhase: Math.random() * Math.PI * 2,
+    id: Math.random().toString(36).slice(2, 9),
+    eventLog: [],
+    visualEffect: 'normal',
+    visualEffectTimer: 0,
+    targetFood: null,
   };
 }
 
 function createTree(wx: number, wy: number): Tree {
   return { x: wx, y: wy, type: 'apple', health: 3, regrowTimer: 0 };
+}
+
+function createFood(wx: number, wy: number): FoodItem {
+  return {
+    x: wx,
+    y: wy,
+    vx: (Math.random() - 0.5) * 0.5,
+    vy: (Math.random() - 0.5) * 0.5,
+    vz: 2 + Math.random() * 1.5,  // initial upward velocity (dropped from hand)
+    z: 1.5,                         // start slightly above ground
+    eaten: false,
+    spawnedAt: state.tick,
+  };
 }
 
 // ── ISO PROJECTION ─────────────────────────────────────────
@@ -164,11 +206,53 @@ function drawTree(ctx: CanvasRenderingContext2D, sx: number, sy: number, tree: T
   }
 }
 
+function drawFood(ctx: CanvasRenderingContext2D, item: FoodItem): void {
+  if (item.eaten) return;
+
+  const { x: sx, y: sy } = worldToScreen(item.x, item.y);
+
+  // Height offset — food appears to float above ground
+  // In isometric view, height (z) translates to negative screen y
+  const screenYOffset = item.z * TILE_H;
+
+  const scale = 1 + item.z * 0.1;
+  const radius = 5 * scale;
+
+  // Shadow on ground (drawn first, beneath everything)
+  const shadowAlpha = Math.max(0.1, 0.5 - item.z * 0.08);
+  ctx.globalAlpha = shadowAlpha;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, radius * 0.9, radius * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Apple body
+  ctx.fillStyle = COLORS.food;
+  ctx.beginPath();
+  ctx.arc(sx, sy - screenYOffset, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  ctx.fillStyle = 'rgba(255,200,200,0.6)';
+  ctx.beginPath();
+  ctx.arc(sx - radius * 0.3, sy - screenYOffset - radius * 0.2, radius * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Stem
+  ctx.strokeStyle = '#5c3a1e';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy - screenYOffset - radius);
+  ctx.lineTo(sx + 2, sy - screenYOffset - radius - 4);
+  ctx.stroke();
+}
+
 function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, creature: Creature, tick: number): void {
   if (!creature.alive) return;
 
   const bob = Math.sin(creature.bobPhase + tick * 0.08) * 2;
-  const cy = sy + bob;
+  let cy = sy + bob;
 
   let bodyColor: string;
   if (creature.hunger < 20 || creature.clean < 20 || creature.happiness < 20) {
@@ -177,13 +261,45 @@ function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, cre
     bodyColor = creature.happiness > 70 ? COLORS.creatureHappy : COLORS.creature;
   }
 
-  const s = 12 + Math.min(creature.age / 200, 4);
+  let s = 12 + Math.min(creature.age / 200, 4);
+  const vEffect = creature.visualEffect || 'normal';
+  const vTimer = creature.visualEffectTimer || 0;
 
+  // Visual effects: grow / shrink scale
+  if (vEffect === 'grow') s *= 1.5;
+  if (vEffect === 'shrink') s *= 0.5;
+
+  ctx.save();
+
+  // Visual effect: spin — rotate around creature center
+  if (vEffect === 'spin') {
+    const angle = (30 - vTimer) * 0.3;
+    ctx.translate(sx, cy - s);
+    ctx.rotate(angle);
+    ctx.translate(-sx, -(cy - s));
+  }
+
+  // Visual effect: flash_yellow halo
+  if (vEffect === 'flash_yellow') {
+    ctx.fillStyle = 'rgba(255, 255, 0, 0.35)';
+    ctx.beginPath();
+    ctx.arc(sx, cy - s, s * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Visual effect: flash_red overlay (drawn after body)
   // Body
   ctx.fillStyle = bodyColor;
   ctx.beginPath();
   ctx.ellipse(sx, cy - s, s, s * 0.8, 0, 0, Math.PI * 2);
   ctx.fill();
+
+  if (vEffect === 'flash_red') {
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.45)';
+    ctx.beginPath();
+    ctx.ellipse(sx, cy - s, s, s * 0.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   // Eyes
   const eyeY = cy - s * 0.4;
@@ -208,9 +324,167 @@ function drawCreature(ctx: CanvasRenderingContext2D, sx: number, sy: number, cre
     ctx.font = '10px monospace';
     ctx.fillText('~', sx + 4, cy - s * 2 - 6);
   }
+
+  ctx.restore();
+}
+
+// ── INDEXEDDB PERSISTENCE ──────────────────────────────────
+
+function saveCreatureEvent(creature: Creature, tool: string, outcome: Record<string, unknown>): void {
+  const req = indexedDB.open('thronglets', 1);
+  req.onupgradeneeded = () => {
+    req.result.createObjectStore('events', { keyPath: 'id', autoIncrement: true });
+  };
+  req.onsuccess = () => {
+    const db = req.result;
+    const tx = db.transaction('events', 'readwrite');
+    tx.objectStore('events').add({
+      throng_id: creature.id,
+      tool,
+      event: outcome.event,
+      log: outcome.log,
+      hunger_after: creature.hunger,
+      happiness_after: creature.happiness,
+      timestamp: Date.now(),
+    });
+  };
+}
+
+// ── LLM TOOL OUTCOMES ──────────────────────────────────────
+
+async function applyToolToCreature(tool: ToolType, creature: Creature): Promise<void> {
+  const apiKey = (window as unknown as Record<string, string>)['__ANTHROPIC_KEY__'] || '';
+  if (!apiKey) {
+    // Fallback deterministic behavior
+    if (tool === 'feed') feedCreature(creature);
+    else if (tool === 'clean') cleanCreature(creature);
+    else if (tool === 'play') playWithCreature(creature);
+    return;
+  }
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        system: `You are the physics engine for a creature in a retro god-game.
+A player applied a tool to a creature. Define what happens — be creative and unexpected.
+The player expects the unexpected. Tools don't always do what they say.
+Return ONLY valid JSON, no other text.`,
+        messages: [{
+          role: 'user',
+          content: `Tool: ${tool}
+Creature state: hunger=${Math.round(creature.hunger)}, clean=${Math.round(creature.clean)}, happiness=${Math.round(creature.happiness)}, age=${Math.round(creature.age)}
+Recent events: ${creature.eventLog?.slice(-3).join(', ') || 'none'}
+
+Define the outcome. Return JSON:
+{
+  "event": "short event name",
+  "log": "one sentence describing what happened in 2nd person",
+  "hunger_delta": number (-50 to +60),
+  "clean_delta": number (-30 to +50),
+  "happiness_delta": number (-40 to +60),
+  "vx": number (-3 to 3),
+  "vy": number (-3 to 3),
+  "visual": "normal" | "flash_yellow" | "flash_red" | "spin" | "grow" | "shrink",
+  "split": boolean
+}`,
+        }],
+      }),
+    });
+
+    const data = await response.json() as { content?: Array<{ text: string }> };
+    const text = data.content?.[0]?.text || '{}';
+
+    try {
+      const outcome = JSON.parse(text) as {
+        event?: string;
+        log?: string;
+        hunger_delta?: number;
+        clean_delta?: number;
+        happiness_delta?: number;
+        vx?: number;
+        vy?: number;
+        visual?: string;
+        split?: boolean;
+      };
+
+      // Apply outcome
+      creature.hunger = Math.max(0, Math.min(100, creature.hunger + (outcome.hunger_delta || 0)));
+      creature.clean = Math.max(0, Math.min(100, creature.clean + (outcome.clean_delta || 0)));
+      creature.happiness = Math.max(0, Math.min(100, creature.happiness + (outcome.happiness_delta || 0)));
+      creature.vx = outcome.vx || 0;
+      creature.vy = outcome.vy || 0;
+      creature.visualEffect = outcome.visual || 'normal';
+      creature.visualEffectTimer = 30;
+
+      if (outcome.split && state.creatures.length < 20) {
+        const child = createCreature(creature.x + 1, creature.y + 1);
+        state.creatures.push(child);
+      }
+
+      // Log to creature history
+      if (!creature.eventLog) creature.eventLog = [];
+      creature.eventLog.push(outcome.log || outcome.event || '');
+      if (creature.eventLog.length > 10) creature.eventLog.shift();
+
+      // Save to IndexedDB
+      saveCreatureEvent(creature, tool, outcome as Record<string, unknown>);
+
+      // Show log message on screen
+      state.lastEvent = outcome.log || outcome.event || '';
+      state.lastEventTimer = 180;
+
+    } catch (_parseErr) {
+      // Fallback on JSON parse failure
+      feedCreature(creature);
+    }
+  } catch (_fetchErr) {
+    // Network/API error fallback
+    feedCreature(creature);
+  }
 }
 
 // ── GAME LOGIC ─────────────────────────────────────────────
+
+function updateFood(dt: number): void {
+  for (const item of state.food) {
+    if (item.eaten) continue;
+
+    // Expire after 600 ticks
+    if (state.tick - item.spawnedAt > 600) {
+      item.eaten = true;
+      continue;
+    }
+
+    // Physics: gravity on z
+    item.vz -= dt * 0.4;
+    item.z = Math.max(0, item.z + item.vz * dt);
+
+    if (item.z <= 0 && item.vz < 0) {
+      item.vz = Math.abs(item.vz) * 0.4;  // bounce with damping
+      if (item.vz < 0.5) item.vz = 0;      // settle
+    }
+
+    // Slight roll on ground
+    if (item.z === 0) {
+      item.x += item.vx * dt * 0.3;
+      item.y += item.vy * dt * 0.3;
+      // Clamp to world bounds
+      item.x = Math.max(0, Math.min(WORLD_W - 1, item.x));
+      item.y = Math.max(0, Math.min(WORLD_H - 1, item.y));
+    }
+  }
+
+  // Remove eaten items
+  state.food = state.food.filter(f => !f.eaten);
+}
 
 function updateCreature(c: Creature, dt: number): void {
   if (!c.alive) return;
@@ -221,6 +495,15 @@ function updateCreature(c: Creature, dt: number): void {
   c.happiness = Math.max(0, c.happiness - dt * 0.015);
   c.bobPhase += dt * 0.1;
   c.stateTimer -= dt;
+
+  // Decrement visual effect timer
+  if (c.visualEffectTimer && c.visualEffectTimer > 0) {
+    c.visualEffectTimer -= dt;
+    if (c.visualEffectTimer <= 0) {
+      c.visualEffectTimer = 0;
+      c.visualEffect = 'normal';
+    }
+  }
 
   if (c.hunger <= 0) {
     c.alive = false;
@@ -249,17 +532,51 @@ function updateCreature(c: Creature, dt: number): void {
     }
   }
 
-  // Random wandering
-  if (c.state === 'idle' && c.stateTimer <= 0) {
-    c.state = 'walking';
-    c.vx = (Math.random() - 0.5) * 0.3;
-    c.vy = (Math.random() - 0.5) * 0.3;
-    c.stateTimer = 50 + Math.random() * 100;
-  } else if (c.state === 'walking' && c.stateTimer <= 0) {
-    c.state = 'idle';
-    c.vx = 0;
-    c.vy = 0;
-    c.stateTimer = 30 + Math.random() * 80;
+  // Food-seeking behavior: wander toward nearest food within 3 world units
+  let nearestFood: FoodItem | null = null;
+  let nearestFoodDist = Infinity;
+  for (const f of state.food) {
+    if (f.eaten || f.z > 0.5) continue; // only ground food
+    const dist = Math.sqrt((c.x - f.x) ** 2 + (c.y - f.y) ** 2);
+    if (dist < 3 && dist < nearestFoodDist) {
+      nearestFood = f;
+      nearestFoodDist = dist;
+    }
+  }
+
+  if (nearestFood) {
+    // Walk toward food
+    const dx = nearestFood.x - c.x;
+    const dy = nearestFood.y - c.y;
+    const mag = Math.sqrt(dx * dx + dy * dy);
+    if (mag > 0.15) {
+      c.state = 'walking';
+      c.vx = (dx / mag) * 0.25;
+      c.vy = (dy / mag) * 0.25;
+      c.stateTimer = 10;
+    } else {
+      // Close enough — eat it
+      nearestFood.eaten = true;
+      c.hunger = Math.min(100, c.hunger + 40);
+      c.happiness = Math.min(100, c.happiness + 5);
+      c.state = 'eating';
+      c.stateTimer = 30;
+      c.vx = 0;
+      c.vy = 0;
+    }
+  } else {
+    // Random wandering (only if not in food-seek mode)
+    if (c.state === 'idle' && c.stateTimer <= 0) {
+      c.state = 'walking';
+      c.vx = (Math.random() - 0.5) * 0.3;
+      c.vy = (Math.random() - 0.5) * 0.3;
+      c.stateTimer = 50 + Math.random() * 100;
+    } else if (c.state === 'walking' && c.stateTimer <= 0) {
+      c.state = 'idle';
+      c.vx = 0;
+      c.vy = 0;
+      c.stateTimer = 30 + Math.random() * 80;
+    }
   }
 
   c.x = Math.max(0, Math.min(WORLD_W - 1, c.x + c.vx * dt));
@@ -346,6 +663,11 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
     drawTree(ctx, sx, sy, tree);
   });
 
+  // Food items (draw shadows first, then apples)
+  for (const item of state.food) {
+    if (!item.eaten) drawFood(ctx, item);
+  }
+
   // Alive creatures (depth sorted)
   state.creatures.filter(c => c.alive)
     .sort((a, b) => (a.x + a.y) - (b.x + b.y))
@@ -369,7 +691,7 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
   const hw = state.mouseWorld;
   if (hw.x >= 0 && hw.x < WORLD_W && hw.y >= 0 && hw.y < WORLD_H) {
     const { x: sx, y: sy } = worldToScreen(hw.x, hw.y);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.strokeStyle = state.tool === 'feed' ? 'rgba(255, 100, 100, 0.5)' : 'rgba(255, 255, 255, 0.3)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(sx, sy - TILE_H / 2);
@@ -378,6 +700,15 @@ function render(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, tick: 
     ctx.lineTo(sx - TILE_W / 2, sy);
     ctx.closePath();
     ctx.stroke();
+  }
+
+  // Event log — scrolling dim green text at bottom-left (Plaything vibes)
+  if (state.lastEvent && state.lastEventTimer > 0) {
+    ctx.globalAlpha = Math.min(1, state.lastEventTimer / 30);
+    ctx.fillStyle = '#00ff88';
+    ctx.font = '11px "Press Start 2P", monospace';
+    ctx.fillText(`> ${state.lastEvent.slice(0, 50)}`, 12, h - 8);
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -421,6 +752,13 @@ function setupInput(canvas: HTMLCanvasElement): void {
     // Use fractional world coords for accurate creature click detection
     const { x: wx, y: wy } = screenToWorld(sx, sy);
 
+    // Feed tool: drop food at click position (not direct-feed)
+    if (state.tool === 'feed') {
+      const food = createFood(wx, wy);
+      state.food.push(food);
+      return;
+    }
+
     // Find nearest alive creature within 2.5 world units
     let nearest: Creature | null = null;
     let nearestDist = Infinity;
@@ -434,11 +772,8 @@ function setupInput(canvas: HTMLCanvasElement): void {
     }
 
     if (nearest) {
-      switch (state.tool) {
-        case 'feed': feedCreature(nearest); break;
-        case 'clean': cleanCreature(nearest); break;
-        case 'play': playWithCreature(nearest); break;
-      }
+      // Call LLM to define outcome for any non-feed tool
+      void applyToolToCreature(state.tool, nearest);
     }
 
     if (state.tool === 'chop') {
@@ -467,6 +802,13 @@ function main(): void {
   const canvas = document.getElementById('game') as HTMLCanvasElement;
   const ctx = canvas.getContext('2d')!;
 
+  // Read API key from localStorage or URL param
+  const key = localStorage.getItem('anthropic_key') || new URLSearchParams(window.location.search).get('key') || '';
+  (window as unknown as Record<string, string>)['__ANTHROPIC_KEY__'] = key;
+  if (!key) {
+    console.warn('No ANTHROPIC_API_KEY — using deterministic fallback. Set via ?key=sk-... or localStorage.anthropic_key');
+  }
+
   function resize(): void {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight - 48;
@@ -478,13 +820,15 @@ function main(): void {
   setupInput(canvas);
 
   {
-
     let lastTime = performance.now();
 
     function loop(now: number): void {
       const dt = Math.min((now - lastTime) / 16.67, 3);
       lastTime = now;
       state.tick++;
+
+      // Update food physics
+      updateFood(dt);
 
       for (const c of state.creatures) {
         updateCreature(c, dt);
@@ -493,6 +837,11 @@ function main(): void {
       state.creatures = state.creatures.filter(c =>
         c.alive || (state.tick - c.diedAt) < 300
       );
+
+      // Tick down event log timer
+      if (state.lastEventTimer > 0) {
+        state.lastEventTimer -= dt;
+      }
 
       render(ctx, canvas, state.tick);
       updateHUD();
