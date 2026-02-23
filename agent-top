@@ -157,35 +157,60 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
+        # Migrate: add columns if not present (existing installs)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(prompt)")}
+        if "pid" not in cols:
+            conn.execute("ALTER TABLE prompt ADD COLUMN pid INTEGER")
+        te_cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_event)")}
+        for col, ctype in [("tool_input", "TEXT"), ("tool_response", "TEXT"), ("tool_use_id", "TEXT"), ("duration_ms", "INTEGER")]:
+            if col not in te_cols:
+                conn.execute(f"ALTER TABLE tool_event ADD COLUMN {col} {ctype}")
 
-        # Active sessions: latest prompt per session.
-        # A session is "active" if un-stopped AND one of:
-        #   - has lastWaitUserAt set (terminal is open, waiting for input — no time limit)
-        #   - had tool activity in the last 30 min (actively running)
-        #   - created within the last 5 min (grace period before first tool call)
-        # Sessions only disappear when Stop fires (terminal closed) or ghost detection (no
-        # lastWaitUserAt and no recent tools = probably killed without Stop).
+        # Active sessions: latest prompt per session, un-stopped only.
+        # No time-based heuristics — we check the actual process PID below.
         for row in conn.execute(
-            """SELECT p.session_id, p.prompt, p.cwd, p.created_at, p.seq, p.lastWaitUserAt
+            """SELECT p.session_id, p.prompt, p.cwd, p.created_at, p.seq, p.lastWaitUserAt, p.pid
                FROM prompt p
                INNER JOIN (
                    SELECT session_id, MAX(id) as max_id
                    FROM prompt
                    WHERE stoped_at IS NULL
-                     AND (
-                       lastWaitUserAt IS NOT NULL
-                       OR created_at > datetime('now', '-5 minutes')
-                       OR session_id IN (
-                         SELECT DISTINCT session_id FROM tool_event
-                         WHERE created_at > datetime('now', '-30 minutes')
-                       )
-                     )
                    GROUP BY session_id
                ) latest ON p.id = latest.max_id
                ORDER BY p.created_at DESC
-               LIMIT 10"""
+               LIMIT 50"""
         ):
             data["active_sessions"].append(dict(row))
+
+        # Tombstone sessions whose Claude process is no longer alive.
+        # pid IS NULL means old row before this feature — fall back to 2h timeout for those.
+        dead_sids = []
+        for s in data["active_sessions"]:
+            pid = s.get("pid")
+            if pid:
+                try:
+                    os.kill(pid, 0)   # signal 0 = existence check, no side effects
+                except (ProcessLookupError, OSError):
+                    dead_sids.append(s["session_id"])
+        if dead_sids:
+            conn.execute(
+                f"UPDATE prompt SET stoped_at = datetime('now') WHERE session_id IN ({','.join('?'*len(dead_sids))}) AND stoped_at IS NULL",
+                dead_sids,
+            )
+            data["active_sessions"] = [s for s in data["active_sessions"] if s["session_id"] not in dead_sids]
+
+        # Fallback: tombstone old sessions with no pid recorded (pre-feature rows).
+        conn.execute(
+            """UPDATE prompt SET stoped_at = datetime('now')
+               WHERE stoped_at IS NULL
+                 AND pid IS NULL
+                 AND created_at < datetime('now', '-2 hours')
+                 AND (lastWaitUserAt IS NULL OR lastWaitUserAt < datetime('now', '-2 hours'))
+                 AND session_id NOT IN (
+                     SELECT DISTINCT session_id FROM tool_event
+                     WHERE created_at > datetime('now', '-30 minutes')
+                 )"""
+        )
 
         # Reap orphaned agents: parent session has no open prompt rows (stoped_at IS NOT NULL
         # on all its prompts), meaning Claude fired the Stop hook and the session is truly gone.
@@ -253,7 +278,7 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
             try:
                 rows = []
                 for row in conn.execute(
-                    """SELECT tool_name, tool_label, created_at FROM tool_event
+                    """SELECT tool_name, tool_label, created_at, tool_input, tool_response, duration_ms FROM tool_event
                        WHERE session_id = ?
                          AND created_at > datetime('now', '-30 minutes')
                        ORDER BY created_at DESC
@@ -263,6 +288,24 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
                     rows.append(dict(row))
                 if rows:
                     data["session_tools"][sid] = list(reversed(rows))
+            except sqlite3.OperationalError:
+                pass
+
+        # Session prompts: all prompts for active sessions (for interleaved tree view)
+        data["session_prompts"] = {}
+        for sid in active_sids:
+            try:
+                rows = []
+                for row in conn.execute(
+                    """SELECT prompt, created_at FROM prompt
+                       WHERE session_id = ? AND prompt IS NOT NULL AND prompt != ''
+                       ORDER BY created_at DESC
+                       LIMIT 20""",
+                    (sid,),
+                ):
+                    rows.append(dict(row))
+                if rows:
+                    data["session_prompts"][sid] = rows  # newest first
             except sqlite3.OperationalError:
                 pass
 
@@ -669,6 +712,9 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
     if bar_w < 5:
         return
 
+    scroll = state.get("detail_scroll", 0)
+    tracks = tracks[scroll:]
+
     pr = y
     type_colors = {"session": GREEN, "agent": MAGENTA, "completed": DIM}
 
@@ -710,12 +756,13 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
 
 
 def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
-    """Hierarchical Tree: selected session's agents + tool timeline."""
+    """Interleaved timeline: prompts, tools, and agents in chronological order (newest first)."""
     active_all = cache.get("active_all", [])
     r_agents = cache.get("r_agents", [])
     c_agents = cache.get("c_agents", [])
     session_tools = cache.get("session_tools", {})
     tool_events = cache.get("tool_events", {})
+    session_prompts = cache.get("session_prompts", {})
     rw = x + w  # absolute right edge
 
     # Scope to selected session
@@ -729,43 +776,55 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         safe_add(stdscr, y, x + 2, "select a session", rw, DIM)
         return
 
-    pr = y
-
-    # Named agents (with non-empty type) for this session
+    # Build unified timeline: collect all events with timestamps
+    timeline = []
+    # Prompts
+    for p in session_prompts.get(target_sid, []):
+        prompt_text = (p.get("prompt") or "").replace("\n", " ").strip()
+        if prompt_text.startswith("<"):
+            continue
+        timeline.append({"ts": p.get("created_at", ""), "kind": "prompt", "text": prompt_text})
+    # Tools
+    for t in (session_tools.get(target_sid, []) or tool_events.get(target_sid, [])):
+        dur_ms = t.get("duration_ms")
+        dur_str = f" {dur_ms}ms" if dur_ms else ""
+        desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+        timeline.append({"ts": t.get("created_at", ""), "kind": "tool", "text": f"{desc}{dur_str}"})
+    # Agents
     children = [a for a in r_agents if a["session_id"] == target_sid and a.get("agent_type")]
     completed = [a for a in c_agents if a["session_id"] == target_sid and a.get("agent_type")][:5]
-    named_agents = children + completed
-    if named_agents:
-        safe_add(stdscr, pr, x + 2, f"AGENTS  {len(named_agents)}", rw, CYAN)
-        pr += 1
-        for i, a in enumerate(named_agents):
-            if pr >= y + h:
-                break
-            is_last = (i == len(named_agents) - 1)
-            connector = "\u2514\u2500" if is_last else "\u251c\u2500"
-            atype = a["agent_type"]
-            adur = fmt_dur(a["started_at"], a.get("stopped_at"))
-            running = a in children
-            color = MAGENTA if running else DIM
-            safe_add(stdscr, pr, x + 2, f"{connector} {atype}  {adur}", rw, color)
-            pr += 1
+    for a in children + completed:
+        adur = fmt_dur(a["started_at"], a.get("stopped_at"))
+        running = a in children
+        timeline.append({"ts": a.get("started_at", ""), "kind": "agent", "text": f"{a['agent_type']}  {adur}",
+                         "running": running})
+
+    # Sort newest first
+    timeline.sort(key=lambda e: e.get("ts", ""), reverse=True)
+
+    scroll = state.get("detail_scroll", 0)
+    timeline = timeline[scroll:]
+
+    pr = y
+    kind_colors = {"prompt": WHITE, "tool": YELLOW, "agent": MAGENTA}
+    kind_icons = {"prompt": "\u25b8", "tool": "\u2502", "agent": "\u25c6"}
+
+    for ev in timeline:
+        if pr >= y + h:
+            break
+        kind = ev["kind"]
+        icon = kind_icons.get(kind, " ")
+        color = kind_colors.get(kind, DIM)
+        if kind == "agent" and not ev.get("running"):
+            color = DIM
+        ts = fmt_time(ev.get("ts", ""))
+        text = ev["text"][:w - 14]
+        safe_add(stdscr, pr, x + 2, ts, rw, DIM)
+        safe_add(stdscr, pr, x + 11, f"{icon} {text}", rw, color)
         pr += 1
 
-    # Tool timeline (always show)
-    tools = session_tools.get(target_sid, []) or tool_events.get(target_sid, [])
-    if tools:
-        safe_add(stdscr, pr, x + 2, f"TOOLS  {len(tools)}", rw, CYAN)
-        pr += 1
-        for t in tools:
-            if pr >= y + h:
-                break
-            ts = fmt_time(t.get("created_at", ""))
-            desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-            safe_add(stdscr, pr, x + 2, ts, rw, DIM)
-            safe_add(stdscr, pr, x + 11, desc[:w - 14], rw, YELLOW)
-            pr += 1
-    elif pr < y + h:
-        safe_add(stdscr, pr, x + 2, "(no tools)", rw, DIM)
+    if not timeline:
+        safe_add(stdscr, y, x + 2, "(no activity)", rw, DIM)
 
 
 def _draw_viz_graph_removed():
@@ -1020,6 +1079,7 @@ def refresh_data(cache: dict, stats_range_idx: int = 2) -> dict:
         "recent": data["recent_prompts"],
         "tool_events": data["tool_events"],
         "session_tools": data["session_tools"],
+        "session_prompts": data["session_prompts"],
         "activity": data["activity"],
         "team_data": team_data,
         "session_lookup": {s["session_id"]: s for s in active_all},
@@ -1093,10 +1153,39 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 if pr >= max_row_virtual:
                     break
                 ts = fmt_time(ev.get("created_at"))
+                dur_ms = ev.get("duration_ms")
+                dur_str = f" {dur_ms}ms" if dur_ms else ""
                 tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
                 P(pr, col, ts, DIM)
-                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
+                P(pr, col + 9, tool_str[:pw - 20], YELLOW)
+                if dur_str:
+                    P(pr, col + 9 + min(len(tool_str), pw - 20) + 1, dur_str, DIM)
                 pr += 1
+                # Show tool_input summary
+                raw_input = ev.get("tool_input")
+                if raw_input and pr < max_row_virtual:
+                    try:
+                        ti = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+                        # Show key fields compactly
+                        parts = []
+                        for k, v in list(ti.items())[:3]:
+                            vs = str(v).replace("\n", " ")[:60]
+                            parts.append(f"{k}={vs}")
+                        input_line = "  " + "  ".join(parts)
+                        P(pr, col, input_line[:pw], DIM)
+                        pr += 1
+                    except Exception:
+                        pass
+                # Show tool_response summary
+                raw_resp = ev.get("tool_response")
+                if raw_resp and pr < max_row_virtual:
+                    try:
+                        tr = json.loads(raw_resp) if isinstance(raw_resp, str) else raw_resp
+                        resp_str = str(tr).replace("\n", " ")[:pw - 4]
+                        P(pr, col, f"  → {resp_str}", GREEN)
+                        pr += 1
+                    except Exception:
+                        pass
 
     elif sel_agent and sel_agent.get("is_teammate"):
         # Task list for selected team member
@@ -2049,9 +2138,18 @@ def main(stdscr, game_of_life=False):
         elif ch == 9:  # Tab — cycle viz mode forward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
+            state["detail_scroll"] = 0
+            # Auto-focus right panel when switching to TIMELINE so j/k scrolls immediately
+            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
+            if viz_m == "gantt":
+                state["focus"] = "right"
         elif ch == 353:  # Shift-Tab — cycle viz mode backward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] - 1) % n_modes
+            state["detail_scroll"] = 0
+            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
+            if viz_m == "gantt":
+                state["focus"] = "right"
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
@@ -2149,36 +2247,56 @@ def main(stdscr, game_of_life=False):
 
 
 def self_update():
-    """Pull latest from GitHub and replace the running script."""
-    import urllib.request
-    raw_url = "https://raw.githubusercontent.com/kingsotn-twelve/agent-top/main/agent-top"
-    try:
-        with urllib.request.urlopen(raw_url, timeout=10) as resp:
-            new_src = resp.read().decode()
-    except Exception as e:
-        print(f"update failed: {e}")
-        sys.exit(1)
-    # Extract remote version
-    remote_ver = None
-    for line in new_src.splitlines()[:30]:
-        if line.startswith("VERSION"):
-            remote_ver = line.split('"')[1]
-            break
-    if remote_ver == VERSION:
-        print(f"already up to date (v{VERSION})")
-        return
-    # Overwrite self
-    me = os.path.realpath(sys.argv[0])
-    try:
-        with open(me, "w") as f:
-            f.write(new_src)
-        print(f"updated v{VERSION} → v{remote_ver}")
-    except Exception as e:
-        print(f"write failed: {e}")
-        sys.exit(1)
+    """Upgrade via uv."""
+    result = subprocess.run(
+        ["uv", "tool", "upgrade", "agent-top"],
+        capture_output=False,
+    )
+    sys.exit(result.returncode)
 
 
-if __name__ == "__main__":
+def setup(no_ccnotify=False):
+    from pathlib import Path
+    import shutil
+    import importlib.resources
+    import stat
+
+    dest = Path.home() / ".claude" / "ccnotify" / "ccnotify.py"
+
+    if no_ccnotify:
+        print("  Skipping ccnotify installation.")
+    elif dest.exists():
+        print(f"  ccnotify.py already exists at {dest} — skipping (delete it first to reinstall)")
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with importlib.resources.path("agent_top", "_ccnotify.py") as src:
+            shutil.copy(src, dest)
+        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"  ccnotify.py  →  {dest}")
+
+    if not no_ccnotify:
+        print()
+        print("Add these hooks to ~/.claude/settings.json:")
+        print()
+        print(f'''\
+{{
+  "hooks": {{
+    "SessionStart":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SessionStart"}}]}}],
+    "SessionEnd":       [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SessionEnd"}}]}}],
+    "SubagentStart":    [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SubagentStart"}}]}}],
+    "SubagentStop":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SubagentStop"}}]}}],
+    "UserPromptSubmit": [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} UserPromptSubmit"}}]}}],
+    "Stop":             [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Stop"}}]}}],
+    "Notification":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Notification"}}]}}],
+    "PreToolUse":       [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PreToolUse"}}]}}],
+    "PostToolUse":      [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PostToolUse"}}]}}]
+  }}
+}}''')
+    print()
+    print("Done. Run: agent-top")
+
+
+def cli():
     parser = argparse.ArgumentParser(
         prog="agent-top",
         description="Live terminal dashboard for Claude Code sessions & agents.\n"
@@ -2190,12 +2308,22 @@ if __name__ == "__main__":
         "--version", action="version", version=f"agent-top v{VERSION}"
     )
     parser.add_argument(
+        "--setup", action="store_true", help="install ccnotify hooks and print settings.json config"
+    )
+    parser.add_argument(
+        "--no-ccnotify", action="store_true", help="use --setup without installing ccnotify"
+    )
+    parser.add_argument(
         "--update", action="store_true", help="self-update from GitHub"
     )
     parser.add_argument(
         "--game-of-life", action="store_true", help="show Conway's Game of Life"
     )
     args = parser.parse_args()
+
+    if args.setup:
+        setup(no_ccnotify=getattr(args, "no_ccnotify", False))
+        sys.exit(0)
 
     if args.update:
         self_update()
@@ -2205,3 +2333,6 @@ if __name__ == "__main__":
         curses.wrapper(lambda stdscr: main(stdscr, game_of_life=args.game_of_life))
     except KeyboardInterrupt:
         pass
+
+if __name__ == "__main__":
+    cli()
