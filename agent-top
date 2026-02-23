@@ -762,7 +762,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     session_tools = cache.get("session_tools", {})
     tool_events = cache.get("tool_events", {})
     session_prompts = cache.get("session_prompts", {})
-    rw = x + w  # absolute right edge
+    rw = x + w - 1  # absolute right edge minus border
 
     # Scope to selected session
     vis = state.get("visible_items", [])
@@ -860,7 +860,7 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         indent = 0 if kind == "prompt" else 2
         col_start = x + 2 + indent
         icon_col = x + 11 + indent
-        text_w = w - 13 - indent  # available width for text after icon
+        text_w = w - 15 - indent  # available width for text after icon (minus borders)
         text = ev["text"]
 
         if kind == "prompt" and len(text) > text_w:
