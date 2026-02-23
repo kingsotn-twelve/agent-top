@@ -8,6 +8,14 @@ Live terminal dashboard for monitoring Claude Code sessions and agents.
 
 ## Setup
 
+Install [uv](https://docs.astral.sh/uv/) if you don't have it:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then install agent-top:
+
 ```bash
 uv tool install git+https://github.com/kingsotn-twelve/agent-top
 agent-top --setup
