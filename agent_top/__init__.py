@@ -816,17 +816,20 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         groups.append((current_prompt, current_children))
     # Reverse so newest prompt is first; children stay in execution order
     groups.reverse()
-    # Apply tree filter: 0=full, 1=prompts only, 2=prompts+agents
-    tf = state.get("tree_filter", 0)
+    # Per-prompt collapse: space toggles individual prompts open/closed
+    collapsed = state.setdefault("_collapsed_prompts", set())
     timeline = []
     for prompt_ev, children in groups:
         if prompt_ev:
+            prompt_key = prompt_ev.get("ts", "")
+            prompt_ev["_prompt_key"] = prompt_key
+            prompt_ev["_child_count"] = len(children)
+            prompt_ev["_collapsed"] = prompt_key in collapsed
             timeline.append(prompt_ev)
-        if tf == 0:  # full
+            if prompt_key not in collapsed:
+                timeline.extend(children)
+        else:
             timeline.extend(children)
-        elif tf == 2:  # prompts+agents
-            timeline.extend(c for c in children if c.get("kind") == "agent")
-        # tf == 1: prompts only, skip children
 
     # Store timeline so Enter can access the highlighted item
     state["_tree_len"] = len(timeline)
@@ -857,7 +860,16 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         idx = scroll + i
         is_cursor = focused and idx == cursor
         kind = ev["kind"]
-        icon = kind_icons.get(kind, " ")
+        if kind == "prompt" and ev.get("_collapsed"):
+            icon = "\u25b6"  # ▶ collapsed
+            n = ev.get("_child_count", 0)
+            suffix = f"  ({n})" if n else ""
+        elif kind == "prompt":
+            icon = "\u25bc"  # ▼ expanded
+            suffix = ""
+        else:
+            icon = kind_icons.get(kind, " ")
+            suffix = ""
         color = kind_colors.get(kind, DIM)
         if kind == "agent" and not ev.get("running"):
             color = DIM
@@ -868,8 +880,10 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         icon_col = x + 11 + indent
         text_w = w - 15 - indent  # available width for text after icon (minus borders)
         text = ev["text"]
+        if suffix and kind == "prompt" and ev.get("_collapsed"):
+            text = text[:text_w - len(suffix)] + suffix
 
-        if kind == "prompt" and len(text) > text_w:
+        if kind == "prompt" and not ev.get("_collapsed") and len(text) > text_w:
             # Wrap prompt across multiple lines
             lines = []
             while text and len(lines) < 4:  # max 4 lines
@@ -2073,12 +2087,8 @@ def draw(stdscr, frame: int, state: dict, cache: dict):
         focused = state.get("focus") == "right"
         viz_mode = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else "life"
 
-        # Build title with tab selector + filter mode
-        TREE_FILTER_LABELS = ["full", "prompts", "prompts+agents"]
+        # Build title with tab selector
         tabs = "  ".join(f"[{VIZ_LABELS[m]}]" if m == viz_mode else VIZ_LABELS[m] for m in VIZ_MODES)
-        if viz_mode == "tree":
-            tf_label = TREE_FILTER_LABELS[state.get("tree_filter", 0)]
-            tabs += f"  ({tf_label})"
         if state.get("game_of_life"):
             tabs += "  LIFE"
         title_prefix = "\u25b6 " if focused else ""
@@ -2301,12 +2311,16 @@ def main(stdscr, game_of_life=False):
                 state["stats_range"] = max(old - 1, 0)
                 if state["stats_range"] != old:
                     refresh_data(cache, state["stats_range"])
-        elif ch == 32:  # Space — toggle tree filter
-            TREE_FILTERS = ["full", "prompts", "prompts+agents"]
-            tf = (state.get("tree_filter", 0) + 1) % len(TREE_FILTERS)
-            state["tree_filter"] = tf
-            state["tree_cursor"] = 0
-            state["detail_scroll"] = 0
+        elif ch == 32:  # Space — toggle collapse on current prompt
+            tl = state.get("_tree_timeline", [])
+            tc = state.get("tree_cursor", 0)
+            if 0 <= tc < len(tl) and tl[tc].get("kind") == "prompt":
+                pk = tl[tc].get("_prompt_key", "")
+                collapsed = state.setdefault("_collapsed_prompts", set())
+                if pk in collapsed:
+                    collapsed.discard(pk)
+                else:
+                    collapsed.add(pk)
         elif ch in (10, 13, curses.KEY_ENTER):
             if state["focus"] == "left" and state["selected"] >= 0:
                 # Enter focuses detail panel
