@@ -831,6 +831,13 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         else:
             timeline.extend(children)
 
+    # Tag each event with its prompt group index so we can dim non-active groups
+    group_idx = -1
+    for ev in timeline:
+        if ev.get("kind") == "prompt":
+            group_idx += 1
+        ev["_group"] = group_idx
+
     # Store timeline so Enter can access the highlighted item
     state["_tree_len"] = len(timeline)
     state["_tree_timeline"] = timeline
@@ -854,6 +861,11 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     kind_icons = {"prompt": "\u25b8", "tool": "\u2502", "agent": "\u25c6"}
     focused = state.get("focus") == "right"
 
+    # Find which group the cursor belongs to
+    cursor_group = -1
+    if 0 <= cursor < len(timeline):
+        cursor_group = timeline[cursor].get("_group", -1)
+
     for i, ev in enumerate(visible):
         if pr >= y + h:
             break
@@ -870,8 +882,12 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         else:
             icon = kind_icons.get(kind, " ")
             suffix = ""
-        color = kind_colors.get(kind, DIM)
-        if kind == "agent" and not ev.get("running"):
+        in_active_group = focused and ev.get("_group") == cursor_group
+        if in_active_group or is_cursor:
+            color = kind_colors.get(kind, DIM)
+            if kind == "agent" and not ev.get("running"):
+                color = DIM
+        else:
             color = DIM
         ts = fmt_time(ev.get("ts", ""))
         # Indent tools/agents under their prompt
