@@ -183,7 +183,8 @@ class ClaudePromptTracker:
                     cwd TEXT,
                     seq INTEGER,
                     stoped_at DATETIME,
-                    lastWaitUserAt DATETIME
+                    lastWaitUserAt DATETIME,
+                    pid INTEGER
                 )
             """)
             conn.execute("""
@@ -215,7 +216,11 @@ class ClaudePromptTracker:
                     session_id TEXT NOT NULL,
                     tool_name TEXT NOT NULL,
                     tool_label TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    tool_input TEXT,
+                    tool_response TEXT,
+                    tool_use_id TEXT,
+                    duration_ms INTEGER
                 )
             """)
             conn.execute("""
@@ -265,10 +270,11 @@ class ClaudePromptTracker:
         if not session_id or not tool_name:
             return
         label = self._extract_tool_label(tool_name, tool_input)
+        tool_use_id = data.get("tool_use_id", "")
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO tool_event (session_id, tool_name, tool_label) VALUES (?, ?, ?)",
-                (session_id, tool_name, label),
+                "INSERT INTO tool_event (session_id, tool_name, tool_label, tool_input, tool_use_id) VALUES (?, ?, ?, ?, ?)",
+                (session_id, tool_name, label, json.dumps(tool_input, default=str)[:4000], tool_use_id),
             )
             # Lazy ring buffer: prune when count > 100, keep last 50
             count = conn.execute(
@@ -285,6 +291,33 @@ class ClaudePromptTracker:
                 )
             conn.commit()
         logging.info(f"Tool event: {tool_name} -> {label} session={session_id}")
+
+    def handle_post_tool_use(self, data: dict) -> None:
+        """Update the matching PreToolUse row with response and duration."""
+        session_id = data.get("session_id", "")
+        tool_use_id = data.get("tool_use_id", "")
+        tool_response = data.get("tool_response", {})
+        if not session_id or not tool_use_id:
+            return
+        response_str = json.dumps(tool_response, default=str)[:4000]
+        with sqlite3.connect(self.db_path) as conn:
+            # Find the matching PreToolUse row and compute duration
+            row = conn.execute(
+                "SELECT id, created_at FROM tool_event WHERE tool_use_id = ? LIMIT 1",
+                (tool_use_id,),
+            ).fetchone()
+            if row:
+                try:
+                    start = datetime.fromisoformat(row[1])
+                    dur_ms = int((datetime.now() - start).total_seconds() * 1000)
+                except Exception:
+                    dur_ms = None
+                conn.execute(
+                    "UPDATE tool_event SET tool_response = ?, duration_ms = ? WHERE id = ?",
+                    (response_str, dur_ms, row[0]),
+                )
+                conn.commit()
+        logging.info(f"PostToolUse: {tool_use_id} session={session_id}")
 
     def handle_subagent_start(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
@@ -363,11 +396,48 @@ class ClaudePromptTracker:
             return
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO prompt (session_id, prompt, cwd) VALUES (?, ?, ?)",
-                (session_id, prompt, cwd),
+                "INSERT INTO prompt (session_id, prompt, cwd, pid) VALUES (?, ?, ?, ?)",
+                (session_id, prompt, cwd, os.getppid()),
             )
             conn.commit()
         logging.info(f"Prompt recorded session={session_id}")
+
+    def handle_session_start(self, data: dict) -> None:
+        """Record session immediately on open — before any prompt is submitted."""
+        session_id = data.get("session_id")
+        cwd = data.get("cwd", "")
+        if not session_id:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            # Only insert if no open row already exists for this session
+            existing = conn.execute(
+                "SELECT id FROM prompt WHERE session_id = ? AND stoped_at IS NULL LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO prompt (session_id, cwd, pid) VALUES (?, ?, ?)",
+                    (session_id, cwd, os.getppid()),
+                )
+                conn.commit()
+        logging.info(f"Session started session={session_id}")
+
+    def handle_session_end(self, data: dict) -> None:
+        """Mark session stopped when terminal closes."""
+        session_id = data.get("session_id")
+        if not session_id:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE prompt SET stoped_at = CURRENT_TIMESTAMP WHERE session_id = ? AND stoped_at IS NULL",
+                (session_id,),
+            )
+            conn.execute(
+                "UPDATE agent SET stopped_at = CURRENT_TIMESTAMP WHERE session_id = ? AND stopped_at IS NULL",
+                (session_id,),
+            )
+            conn.commit()
+        logging.info(f"Session ended session={session_id}")
 
     def handle_stop(self, data: dict, is_subagent: bool = False) -> None:
         session_id = data.get("session_id")
@@ -385,10 +455,10 @@ class ClaudePromptTracker:
 
             if row:
                 record_id = row[0]
-                # Clear ALL un-stopped rows for this session, not just the latest.
-                # Previous Stop failures can leave multiple stale rows; clean them all.
+                # Mark session as waiting — NOT stopped. Session stays visible.
+                # Only SessionEnd sets stoped_at (terminal actually closed).
                 conn.execute(
-                    "UPDATE prompt SET stoped_at = CURRENT_TIMESTAMP WHERE session_id = ? AND stoped_at IS NULL",
+                    "UPDATE prompt SET lastWaitUserAt = CURRENT_TIMESTAMP WHERE session_id = ? AND stoped_at IS NULL",
                     (session_id,),
                 )
                 conn.commit()
@@ -401,7 +471,7 @@ class ClaudePromptTracker:
                 seq = "?"
                 duration = ""
 
-        # Clean up any running agents for this session — they're orphans now
+        # Clean up any running agents for this session — they're done for this turn
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """UPDATE agent SET stopped_at = CURRENT_TIMESTAMP
@@ -497,8 +567,8 @@ def main():
         return
 
     event = sys.argv[1]
-    valid = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "Notification", "PreToolUse",
-             "TeammateIdle", "TaskCompleted"]
+    valid = ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
+             "Notification", "PreToolUse", "PostToolUse", "TeammateIdle", "TaskCompleted"]
     if event not in valid:
         logging.error(f"Invalid event: {event}")
         sys.exit(1)
@@ -515,7 +585,11 @@ def main():
 
     tracker = ClaudePromptTracker()
 
-    if event == "UserPromptSubmit":
+    if event == "SessionStart":
+        tracker.handle_session_start(data)
+    elif event == "SessionEnd":
+        tracker.handle_session_end(data)
+    elif event == "UserPromptSubmit":
         tracker.handle_user_prompt_submit(data)
     elif event == "Stop":
         tracker.handle_stop(data, is_subagent=False)
@@ -535,6 +609,8 @@ def main():
         tracker.handle_notification(data)
     elif event == "PreToolUse":
         tracker.handle_pre_tool_use(data)
+    elif event == "PostToolUse":
+        tracker.handle_post_tool_use(data)
     elif event == "TeammateIdle":
         tracker.handle_teammate_idle(data)
     elif event == "TaskCompleted":

@@ -2135,21 +2135,16 @@ def main(stdscr, game_of_life=False):
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q")):
             break
-        elif ch == 9:  # Tab — cycle viz mode forward
+        elif ch == 9:  # Tab — cycle viz mode forward, auto-focus right panel
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
             state["detail_scroll"] = 0
-            # Auto-focus right panel when switching to TIMELINE so j/k scrolls immediately
-            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
-            if viz_m == "gantt":
-                state["focus"] = "right"
-        elif ch == 353:  # Shift-Tab — cycle viz mode backward
+            state["focus"] = "right"
+        elif ch == 353:  # Shift-Tab — cycle viz mode backward, auto-focus right panel
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] - 1) % n_modes
             state["detail_scroll"] = 0
-            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
-            if viz_m == "gantt":
-                state["focus"] = "right"
+            state["focus"] = "right"
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
