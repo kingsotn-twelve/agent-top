@@ -788,7 +788,8 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         dur_ms = t.get("duration_ms")
         dur_str = f" {dur_ms}ms" if dur_ms else ""
         desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-        timeline.append({"ts": t.get("created_at", ""), "kind": "tool", "text": f"{desc}{dur_str}"})
+        timeline.append({"ts": t.get("created_at", ""), "kind": "tool", "text": f"{desc}{dur_str}",
+                         "_raw_input": t.get("tool_input"), "_tool_name": t.get("tool_name")})
     # Agents
     children = [a for a in r_agents if a["session_id"] == target_sid and a.get("agent_type")]
     completed = [a for a in c_agents if a["session_id"] == target_sid and a.get("agent_type")][:5]
@@ -821,8 +822,9 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
             timeline.append(prompt_ev)
         timeline.extend(children)
 
-    # Store length so j/k can clamp
+    # Store timeline so Enter can access the highlighted item
     state["_tree_len"] = len(timeline)
+    state["_tree_timeline"] = timeline
     cursor = state.get("tree_cursor", 0)
     if cursor >= len(timeline):
         cursor = max(0, len(timeline) - 1)
@@ -2295,22 +2297,27 @@ def main(stdscr, game_of_life=False):
                 state["focus"] = "right"
                 state["detail_scroll"] = 0; state["tree_cursor"] = 0
             elif state["focus"] == "right":
-                # Enter on detail opens agent transcript
-                idx = state["selected"]
-                agents = state["visible_items"]
-                if 0 <= idx < len(agents):
-                    item = agents[idx]
-                    is_agent = not item.get("is_session") and not item.get("is_teammate")
-                    is_history_agent = item.get("is_history") and item.get("kind") == "agent"
-                    if is_agent or is_history_agent:
-                        short = item["agent_id"][:7]
+                # Enter on tree item: open file if it's a Read/Edit/Write tool
+                tl = state.get("_tree_timeline", [])
+                tc = state.get("tree_cursor", 0)
+                if 0 <= tc < len(tl):
+                    ev = tl[tc]
+                    if ev.get("kind") == "tool" and ev.get("_raw_input"):
                         try:
-                            err = open_agent_in_iterm2(item)
-                            atype = (item.get("agent_type") or "agent")[:12]
-                            state["status_msg"] = err if err else f"opened tab: {atype}-{short}"
-                        except Exception as e:
-                            state["status_msg"] = str(e)[:40]
-                        state["status_until"] = time.time() + 3
+                            ti = json.loads(ev["_raw_input"]) if isinstance(ev["_raw_input"], str) else ev["_raw_input"]
+                            fp = ti.get("file_path", "")
+                        except Exception:
+                            fp = ""
+                        if fp:
+                            try:
+                                subprocess.Popen([
+                                    "osascript", "-e",
+                                    f'tell application "iTerm2" to tell current window to create tab with default profile command "less +G \\"{fp}\\""'
+                                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                state["status_msg"] = f"opened: {os.path.basename(fp)}"
+                            except Exception as e:
+                                state["status_msg"] = str(e)[:40]
+                            state["status_until"] = time.time() + 3
 
 
 def self_update():

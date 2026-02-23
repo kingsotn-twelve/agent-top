@@ -19,38 +19,59 @@ The dashboard shows tool events in the TREE timeline as one-liners (`Read file: 
 - Agent flow graphs (nice but low daily value)
 - Permission event tracking (easy to add later)
 
+## Current TREE Layout
+
+The TREE panel groups tool calls under their parent prompt, newest prompt at top:
+
+```
+ca95662 · [claude-agents] · 34s
+──────────────────────────────────────────────────────────────────────────
+05:17:05 ▸ why did we lose some history down here?
+  05:17:21 │ Run command: grep -n "30 minutes.*session_tools\|LIMIT 20.*sess
+  05:17:27 │ Run command: kingsotn-twe
+  05:17:32 │ Read file: __init__.py
+05:16:26 ▸ uh we're still populating tool calls above the user prompt
+  05:16:27 │ learn-observer: 65
+  05:16:32 │ Read file: __init__.py
+  05:16:49 │ Edit file: __init__.py
+  05:16:56 │ Run command: agent
+```
+
+- Prompts at left edge with `▸` (cyan)
+- Tool calls indented 2 spaces with `│` (yellow)
+- Session header + divider at top
+
 ## Design
 
 ### Feature 1: Tool Call Inline Expansion
 
-**Interaction**: `j/k` navigates tool events in the TREE. `Enter` toggles expand/collapse on the selected tool event.
+**Interaction**: `j/k` navigates all items in the TREE (prompts + tool events). `Enter` on a tool event toggles expand/collapse.
 
 **Collapsed** (current):
 ```
-│ 05:14:01 │ Read file: __init__.py
-│ 05:13:50 │ Run command: "sele
-│ 05:13:38 │ Run command: kin
+05:17:05 ▸ why did we lose some history down here?
+  05:17:21 │ Run command: grep -n "30 minutes...
+  05:17:27 │ Run command: kingsotn-twe
+  05:17:32 │ Read file: __init__.py
 ```
 
-**Expanded** (selected tool event):
+**Expanded** (Enter on a tool event):
 ```
-│ 05:14:01 │ Read file: __init__.py
-│ 05:13:50 ┃ Run command: "sele                          89ms
-│          ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-│          ┃  command: "select * from tool_event limit 5"
-│          ┃  → 5 rows returned
-│          ┃    id=142 session_id=ca9566 tool_name=Read
-│          ┃    id=141 session_id=ca9566 tool_name=Grep
-│          ┃    ...
-│          ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-│ 05:13:38 │ Run command: kin
+05:17:05 ▸ why did we lose some history down here?
+  05:17:21 │ Run command: grep -n "30 minutes...
+  05:17:27 ┃ Run command: kingsotn-twe                              89ms
+            ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+            ┃  command: "kingsotn-twelve"
+            ┃  → (no output)
+            ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  05:17:32 │ Read file: __init__.py
 ```
 
 Visual indicators:
 - `┃` bright connector on expanded event (vs `│` dim on collapsed)
 - `╌╌╌` dotted separator before/after expanded content
 - Duration displayed right-aligned with color: green (<1s), yellow (<5s), red (>5s)
-- Expanded content indented under the tool event line
+- Expanded content at same indent level as the tool event line
 
 **Smart summary** — parse response by tool type:
 - **Read**: first 3 + last 2 lines of file content, total line count
@@ -79,24 +100,25 @@ ALTER TABLE tool_event ADD COLUMN error_message TEXT;
 
 **Timeline display**:
 ```
-│ 05:14:01 │ Read file: __init__.py
-│ 05:13:50 ✗ Bash: npm test                             4.2s
-│ 05:13:38 │ Run command: kin
+05:17:05 ▸ why did we lose some history?
+  05:17:21 │ Read file: __init__.py
+  05:17:27 ✗ Bash: npm test                                     4.2s
+  05:17:32 │ Run command: kin
 ```
 
 Red `✗` replaces `│` for failed tool calls. Entire line rendered in RED color pair.
 
 **Expanded error**:
 ```
-│ 05:13:50 ✗ Bash: npm test                             4.2s
-│          ✗ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-│          ✗  command: "npm test"
-│          ✗  ERROR
-│          ✗  Command exited with non-zero status code 1
-│          ✗  FAIL src/auth.test.ts
-│          ✗    ● login should validate token
-│          ✗    Expected: 200, Received: 401
-│          ✗ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  05:17:27 ✗ Bash: npm test                                     4.2s
+            ✗ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+            ✗  command: "npm test"
+            ✗  ERROR
+            ✗  Command exited with non-zero status code 1
+            ✗  FAIL src/auth.test.ts
+            ✗    ● login should validate token
+            ✗    Expected: 200, Received: 401
+            ✗ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
 ```
 
 Error content rendered in RED. Shows input first, then error message.
