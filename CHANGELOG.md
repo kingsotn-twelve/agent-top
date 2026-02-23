@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.9.3 — Feb 22, 2026
+
+### One-command install
+
+Install and set up hooks in two commands — no cloning required.
+
+```bash
+uv tool install git+https://github.com/kingsotn-twelve/agent-top
+agent-top --setup
+```
+
+`--setup` installs `ccnotify.py` to `~/.claude/ccnotify/` and prints the hook config to paste into `~/.claude/settings.json`. Safe to run on existing installs — won't overwrite `ccnotify.py` if it's already there.
+
 ## v0.9.2 — Feb 22, 2026
 
 ### uv installable

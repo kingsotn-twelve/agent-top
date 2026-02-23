@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -2178,6 +2178,40 @@ def self_update():
         sys.exit(1)
 
 
+def setup():
+    import shutil
+    import importlib.resources
+    import stat
+
+    ccnotify_dir = Path.home() / ".claude" / "ccnotify"
+    ccnotify_dir.mkdir(parents=True, exist_ok=True)
+    dest = ccnotify_dir / "ccnotify.py"
+
+    if dest.exists():
+        print(f"  ccnotify.py already exists at {dest} — skipping (delete it first to reinstall)")
+    else:
+        with importlib.resources.path("agent_top", "_ccnotify.py") as src:
+            shutil.copy(src, dest)
+        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"  ccnotify.py  →  {dest}")
+    print()
+    print("Add these hooks to ~/.claude/settings.json:")
+    print()
+    print(f'''\
+{{
+  "hooks": {{
+    "SubagentStart":    [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SubagentStart"}}]}}],
+    "SubagentStop":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} SubagentStop"}}]}}],
+    "UserPromptSubmit": [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} UserPromptSubmit"}}]}}],
+    "Stop":             [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Stop"}}]}}],
+    "Notification":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Notification"}}]}}],
+    "PreToolUse":       [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PreToolUse"}}]}}]
+  }}
+}}''')
+    print()
+    print("Done. Run: agent-top")
+
+
 def cli():
     parser = argparse.ArgumentParser(
         prog="agent-top",
@@ -2190,12 +2224,19 @@ def cli():
         "--version", action="version", version=f"agent-top v{VERSION}"
     )
     parser.add_argument(
+        "--setup", action="store_true", help="install ccnotify hooks and print settings.json config"
+    )
+    parser.add_argument(
         "--update", action="store_true", help="self-update from GitHub"
     )
     parser.add_argument(
         "--game-of-life", action="store_true", help="show Conway's Game of Life"
     )
     args = parser.parse_args()
+
+    if args.setup:
+        setup()
+        sys.exit(0)
 
     if args.update:
         self_update()
