@@ -220,9 +220,17 @@ class ClaudePromptTracker:
                     tool_input TEXT,
                     tool_response TEXT,
                     tool_use_id TEXT,
-                    duration_ms INTEGER
+                    duration_ms INTEGER,
+                    is_error INTEGER DEFAULT 0,
+                    error_message TEXT
                 )
             """)
+            # Migrate: add new columns for existing installs
+            for col, ctype in [("is_error", "INTEGER DEFAULT 0"), ("error_message", "TEXT")]:
+                try:
+                    conn.execute(f"ALTER TABLE tool_event ADD COLUMN {col} {ctype}")
+                except sqlite3.OperationalError:
+                    pass
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tool_event_session
                     ON tool_event (session_id, created_at DESC)
@@ -318,6 +326,31 @@ class ClaudePromptTracker:
                 )
                 conn.commit()
         logging.info(f"PostToolUse: {tool_use_id} session={session_id}")
+
+    def handle_post_tool_use_failure(self, data: dict) -> None:
+        """Mark a tool event as failed and store the error message."""
+        session_id = data.get("session_id", "")
+        tool_use_id = data.get("tool_use_id", "")
+        error = data.get("error", "")
+        if not session_id or not tool_use_id:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT id, created_at FROM tool_event WHERE tool_use_id = ? LIMIT 1",
+                (tool_use_id,),
+            ).fetchone()
+            if row:
+                try:
+                    start = datetime.fromisoformat(row[1])
+                    dur_ms = int((datetime.now() - start).total_seconds() * 1000)
+                except Exception:
+                    dur_ms = None
+                conn.execute(
+                    "UPDATE tool_event SET is_error = 1, error_message = ?, duration_ms = ? WHERE id = ?",
+                    (error[:4000], dur_ms, row[0]),
+                )
+                conn.commit()
+        logging.info(f"PostToolUseFailure: {tool_use_id} session={session_id} error={error[:80]}")
 
     def handle_subagent_start(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
@@ -568,7 +601,7 @@ def main():
 
     event = sys.argv[1]
     valid = ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
-             "Notification", "PreToolUse", "PostToolUse", "TeammateIdle", "TaskCompleted"]
+             "Notification", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TeammateIdle", "TaskCompleted"]
     if event not in valid:
         logging.error(f"Invalid event: {event}")
         sys.exit(1)
@@ -611,6 +644,8 @@ def main():
         tracker.handle_pre_tool_use(data)
     elif event == "PostToolUse":
         tracker.handle_post_tool_use(data)
+    elif event == "PostToolUseFailure":
+        tracker.handle_post_tool_use_failure(data)
     elif event == "TeammateIdle":
         tracker.handle_teammate_idle(data)
     elif event == "TaskCompleted":
