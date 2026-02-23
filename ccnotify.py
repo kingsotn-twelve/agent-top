@@ -245,23 +245,32 @@ class ClaudePromptTracker:
     @staticmethod
     def _extract_tool_label(tool_name: str, tool_input: dict) -> str:
         """Build a short human-readable label from tool input."""
+        # Prefer the description field when available — it's a human-readable
+        # summary that Claude provides for tool calls.
+        desc = tool_input.get("description", "")
         if tool_name in ("Read", "Write", "Edit"):
             fp = tool_input.get("file_path", "")
             return os.path.basename(fp) if fp else tool_name
         if tool_name == "Bash":
+            if desc:
+                return desc[:60]
             cmd = tool_input.get("command", "")
             first_line = cmd.split("\n", 1)[0]
             return first_line[:50] if first_line else tool_name
         if tool_name == "Grep":
+            if desc:
+                return desc[:60]
             pat = tool_input.get("pattern", "")
             return f'"{pat[:40]}"' if pat else tool_name
         if tool_name == "Glob":
+            if desc:
+                return desc[:60]
             return tool_input.get("pattern", tool_name)[:50]
         if tool_name == "WebSearch":
             return f'"{tool_input.get("query", "")[:40]}"'
         if tool_name == "Task":
-            return tool_input.get("subagent_type", tool_name)
-        return tool_name
+            return tool_input.get("description", "") or tool_input.get("subagent_type", tool_name)
+        return desc[:60] if desc else tool_name
 
     def handle_pre_tool_use(self, data: dict) -> None:
         session_id = data.get("session_id", "")
