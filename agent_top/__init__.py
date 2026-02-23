@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -2452,12 +2452,6 @@ def main(stdscr, game_of_life=False):
         draw(stdscr, frame, state, cache)
         frame += 1
         ch = stdscr.getch()
-        # Always show debug info in footer
-        tl_dbg = state.get("_tree_timeline", [])
-        tc_dbg = state.get("tree_cursor", 0)
-        kind_dbg = tl_dbg[tc_dbg].get("kind", "?") if 0 <= tc_dbg < len(tl_dbg) else "none"
-        state["status_msg"] = f"[DEBUG] ch={ch} focus={state.get('focus')} tc={tc_dbg} kind={kind_dbg} exp={state.get('_expanded_tool', -1)} tl_len={len(tl_dbg)}"
-        state["status_until"] = time.time() + 60
         if ch in (ord("q"), ord("Q")):
             break
         elif ch == 9:  # Tab — cycle viz mode forward, auto-focus right panel
