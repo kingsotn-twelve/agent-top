@@ -50,27 +50,6 @@ rm -rf ~/.claude/ccnotify/
 
 Then remove the hooks block from `~/.claude/settings.json`.
 
-## What it shows
-
-```
- SESSIONS (2 running · 3 agents)
- ◎   1m23s 15b04e implement dark mode
-   ├ ⠹  45s [rodeo]   Explore a3f82bc
-   └ ⠹  12s [rodeo]   Plan    b9d1e34
- ◎     14s a3f82b fix auth bug
-   └ ⠹   8s [myapp]   Bash    c7a2f90
- ○   5m02s 9c1d3a (waiting)
-   └ Read→handler.go  Grep→"auth"
-```
-
-| Element | Description |
-|---------|-------------|
-| Session line | Active session with spinner, elapsed time, session ID, and prompt. Green = running, dim = waiting for input |
-| Child agents | Running subagents nested under their parent with `├`/`└` connectors, showing `[dirname]` tag, type, ID, and elapsed time |
-| Tool feed | Last 3 tool calls inline for agentless sessions (e.g. `Read→file.go`, `Bash→make test`) |
-| Right panel | 7-day bar charts for top agent types and tools, or live transcript preview when an agent is selected |
-| History | Interleaved timeline of completed agents (▸) and finished prompts |
-
 ### Keyboard shortcuts
 
 | Key | Action |
