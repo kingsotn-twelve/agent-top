@@ -183,7 +183,8 @@ class ClaudePromptTracker:
                     cwd TEXT,
                     seq INTEGER,
                     stoped_at DATETIME,
-                    lastWaitUserAt DATETIME
+                    lastWaitUserAt DATETIME,
+                    pid INTEGER
                 )
             """)
             conn.execute("""
@@ -363,8 +364,8 @@ class ClaudePromptTracker:
             return
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO prompt (session_id, prompt, cwd) VALUES (?, ?, ?)",
-                (session_id, prompt, cwd),
+                "INSERT INTO prompt (session_id, prompt, cwd, pid) VALUES (?, ?, ?, ?)",
+                (session_id, prompt, cwd, os.getppid()),
             )
             conn.commit()
         logging.info(f"Prompt recorded session={session_id}")

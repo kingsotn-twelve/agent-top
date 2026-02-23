@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -157,41 +157,49 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
+        # Migrate: add pid column if not present (existing installs)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(prompt)")}
+        if "pid" not in cols:
+            conn.execute("ALTER TABLE prompt ADD COLUMN pid INTEGER")
 
-        # Active sessions: latest prompt per session.
-        # A session is "active" if un-stopped AND one of:
-        #   - has lastWaitUserAt set (terminal is open, waiting for input within last 30 min)
-        #   - had tool activity in the last 30 min (actively running)
-        #   - created within the last 5 min (grace period before first tool call)
-        # Sessions only disappear when Stop fires (terminal closed) or ghost detection (no
-        # lastWaitUserAt and no recent tools = probably killed without Stop).
+        # Active sessions: latest prompt per session, un-stopped only.
+        # No time-based heuristics — we check the actual process PID below.
         for row in conn.execute(
-            """SELECT p.session_id, p.prompt, p.cwd, p.created_at, p.seq, p.lastWaitUserAt
+            """SELECT p.session_id, p.prompt, p.cwd, p.created_at, p.seq, p.lastWaitUserAt, p.pid
                FROM prompt p
                INNER JOIN (
                    SELECT session_id, MAX(id) as max_id
                    FROM prompt
                    WHERE stoped_at IS NULL
-                     AND (
-                       lastWaitUserAt > datetime('now', '-30 minutes')
-                       OR created_at > datetime('now', '-5 minutes')
-                       OR session_id IN (
-                         SELECT DISTINCT session_id FROM tool_event
-                         WHERE created_at > datetime('now', '-30 minutes')
-                       )
-                     )
                    GROUP BY session_id
                ) latest ON p.id = latest.max_id
                ORDER BY p.created_at DESC
-               LIMIT 10"""
+               LIMIT 50"""
         ):
             data["active_sessions"].append(dict(row))
 
-        # Tombstone zombie sessions: stoped_at never fired, no recent activity.
-        # Marks them stopped so they don't accumulate in the DB forever.
+        # Tombstone sessions whose Claude process is no longer alive.
+        # pid IS NULL means old row before this feature — fall back to 2h timeout for those.
+        dead_sids = []
+        for s in data["active_sessions"]:
+            pid = s.get("pid")
+            if pid:
+                try:
+                    os.kill(pid, 0)   # signal 0 = existence check, no side effects
+                except (ProcessLookupError, OSError):
+                    dead_sids.append(s["session_id"])
+        if dead_sids:
+            conn.execute(
+                f"UPDATE prompt SET stoped_at = datetime('now') WHERE session_id IN ({','.join('?'*len(dead_sids))}) AND stoped_at IS NULL",
+                dead_sids,
+            )
+            data["active_sessions"] = [s for s in data["active_sessions"] if s["session_id"] not in dead_sids]
+
+        # Fallback: tombstone old sessions with no pid recorded (pre-feature rows).
         conn.execute(
             """UPDATE prompt SET stoped_at = datetime('now')
                WHERE stoped_at IS NULL
+                 AND pid IS NULL
                  AND created_at < datetime('now', '-2 hours')
                  AND (lastWaitUserAt IS NULL OR lastWaitUserAt < datetime('now', '-2 hours'))
                  AND session_id NOT IN (
