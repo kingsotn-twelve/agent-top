@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -689,6 +689,9 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
     bar_w = w - label_w - 4
     if bar_w < 5:
         return
+
+    scroll = state.get("detail_scroll", 0)
+    tracks = tracks[scroll:]
 
     pr = y
     type_colors = {"session": GREEN, "agent": MAGENTA, "completed": DIM}
@@ -2070,9 +2073,18 @@ def main(stdscr, game_of_life=False):
         elif ch == 9:  # Tab — cycle viz mode forward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
+            state["detail_scroll"] = 0
+            # Auto-focus right panel when switching to TIMELINE so j/k scrolls immediately
+            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
+            if viz_m == "gantt":
+                state["focus"] = "right"
         elif ch == 353:  # Shift-Tab — cycle viz mode backward
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] - 1) % n_modes
+            state["detail_scroll"] = 0
+            viz_m = VIZ_MODES[state["viz_mode"] % len(VIZ_MODES)] if state["viz_mode"] < len(VIZ_MODES) else ""
+            if viz_m == "gantt":
+                state["focus"] = "right"
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
