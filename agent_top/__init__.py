@@ -802,16 +802,33 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     # Sort newest first
     timeline.sort(key=lambda e: e.get("ts", ""), reverse=True)
 
+    # Store length so j/k can clamp
+    state["_tree_len"] = len(timeline)
+    cursor = state.get("tree_cursor", 0)
+    if cursor >= len(timeline):
+        cursor = max(0, len(timeline) - 1)
+        state["tree_cursor"] = cursor
+
+    # Auto-scroll to keep cursor visible
+    visible_rows = h
     scroll = state.get("detail_scroll", 0)
-    timeline = timeline[scroll:]
+    if cursor < scroll:
+        scroll = cursor
+    elif cursor >= scroll + visible_rows:
+        scroll = cursor - visible_rows + 1
+    state["detail_scroll"] = scroll
+    visible = timeline[scroll:scroll + visible_rows]
 
     pr = y
     kind_colors = {"prompt": WHITE, "tool": YELLOW, "agent": MAGENTA}
     kind_icons = {"prompt": "\u25b8", "tool": "\u2502", "agent": "\u25c6"}
+    focused = state.get("focus") == "right"
 
-    for ev in timeline:
+    for i, ev in enumerate(visible):
         if pr >= y + h:
             break
+        idx = scroll + i
+        is_cursor = focused and idx == cursor
         kind = ev["kind"]
         icon = kind_icons.get(kind, " ")
         color = kind_colors.get(kind, DIM)
@@ -819,8 +836,14 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
             color = DIM
         ts = fmt_time(ev.get("ts", ""))
         text = ev["text"][:w - 14]
-        safe_add(stdscr, pr, x + 2, ts, rw, DIM)
-        safe_add(stdscr, pr, x + 11, f"{icon} {text}", rw, color)
+        if is_cursor:
+            # Highlight row
+            safe_add(stdscr, pr, x + 1, " " * (w - 2), rw, curses.A_REVERSE)
+            safe_add(stdscr, pr, x + 2, ts, rw, DIM | curses.A_REVERSE)
+            safe_add(stdscr, pr, x + 11, f"{icon} {text}", rw, color | curses.A_REVERSE)
+        else:
+            safe_add(stdscr, pr, x + 2, ts, rw, DIM)
+            safe_add(stdscr, pr, x + 11, f"{icon} {text}", rw, color)
         pr += 1
 
     if not timeline:
@@ -2138,37 +2161,31 @@ def main(stdscr, game_of_life=False):
         elif ch == 9:  # Tab — cycle viz mode forward, auto-focus right panel
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] + 1) % n_modes
-            state["detail_scroll"] = 0
+            state["detail_scroll"] = 0; state["tree_cursor"] = 0
             state["focus"] = "right"
         elif ch == 353:  # Shift-Tab — cycle viz mode backward, auto-focus right panel
             n_modes = len(VIZ_MODES) + (1 if state.get("game_of_life") else 0)
             state["viz_mode"] = (state["viz_mode"] - 1) % n_modes
-            state["detail_scroll"] = 0
+            state["detail_scroll"] = 0; state["tree_cursor"] = 0
             state["focus"] = "right"
         elif ch == 27:  # Esc
             if state["focus"] == "right":
                 state["focus"] = "left"
-                state["detail_scroll"] = 0
+                state["detail_scroll"] = 0; state["tree_cursor"] = 0
             else:
                 state["selected"] = -1
         elif ch in (ord("j"), curses.KEY_DOWN):
             if state["focus"] == "right":
-                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
-                if viz_m == "graph" and state.get("graph_nodes"):
-                    state["graph_hover"] = min(state.get("graph_hover", 0) + 1, len(state["graph_nodes"]) - 1)
-                else:
-                    state["detail_scroll"] = state.get("detail_scroll", 0) + 1
+                tc = state.get("tree_cursor", 0)
+                tl = state.get("_tree_len", 0)
+                state["tree_cursor"] = min(tc + 1, max(0, tl - 1))
             else:
                 agents = state["visible_items"]
                 if agents:
                     state["selected"] = min(state["selected"] + 1, len(agents) - 1) if state["selected"] >= 0 else 0
         elif ch in (ord("k"), curses.KEY_UP):
             if state["focus"] == "right":
-                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
-                if viz_m == "graph" and state.get("graph_nodes"):
-                    state["graph_hover"] = max(0, state.get("graph_hover", 0) - 1)
-                else:
-                    state["detail_scroll"] = max(0, state.get("detail_scroll", 0) - 1)
+                state["tree_cursor"] = max(0, state.get("tree_cursor", 0) - 1)
             elif state["selected"] > 0:
                 state["selected"] -= 1
         elif ch in (ord("l"), curses.KEY_RIGHT):
@@ -2190,7 +2207,7 @@ def main(stdscr, game_of_life=False):
                 sel_is_stat = 0 <= sel < len(items) and items[sel].get("is_stat")
                 if state["focus"] == "left" and sel >= 0 and not sel_is_stat:
                     state["focus"] = "right"
-                    state["detail_scroll"] = 0
+                    state["detail_scroll"] = 0; state["tree_cursor"] = 0
                     state["graph_hover"] = 0
                 else:
                     old = state["stats_range"]
@@ -2211,7 +2228,7 @@ def main(stdscr, game_of_life=False):
                         break  # passed this layer
             elif state["focus"] == "right":
                 state["focus"] = "left"
-                state["detail_scroll"] = 0
+                state["detail_scroll"] = 0; state["tree_cursor"] = 0
             else:
                 old = state["stats_range"]
                 state["stats_range"] = max(old - 1, 0)
@@ -2221,7 +2238,7 @@ def main(stdscr, game_of_life=False):
             if state["focus"] == "left" and state["selected"] >= 0:
                 # Enter focuses detail panel
                 state["focus"] = "right"
-                state["detail_scroll"] = 0
+                state["detail_scroll"] = 0; state["tree_cursor"] = 0
             elif state["focus"] == "right":
                 # Enter on detail opens agent transcript
                 idx = state["selected"]
