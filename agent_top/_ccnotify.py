@@ -216,7 +216,11 @@ class ClaudePromptTracker:
                     session_id TEXT NOT NULL,
                     tool_name TEXT NOT NULL,
                     tool_label TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    tool_input TEXT,
+                    tool_response TEXT,
+                    tool_use_id TEXT,
+                    duration_ms INTEGER
                 )
             """)
             conn.execute("""
@@ -266,10 +270,11 @@ class ClaudePromptTracker:
         if not session_id or not tool_name:
             return
         label = self._extract_tool_label(tool_name, tool_input)
+        tool_use_id = data.get("tool_use_id", "")
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO tool_event (session_id, tool_name, tool_label) VALUES (?, ?, ?)",
-                (session_id, tool_name, label),
+                "INSERT INTO tool_event (session_id, tool_name, tool_label, tool_input, tool_use_id) VALUES (?, ?, ?, ?, ?)",
+                (session_id, tool_name, label, json.dumps(tool_input, default=str)[:4000], tool_use_id),
             )
             # Lazy ring buffer: prune when count > 100, keep last 50
             count = conn.execute(
@@ -286,6 +291,33 @@ class ClaudePromptTracker:
                 )
             conn.commit()
         logging.info(f"Tool event: {tool_name} -> {label} session={session_id}")
+
+    def handle_post_tool_use(self, data: dict) -> None:
+        """Update the matching PreToolUse row with response and duration."""
+        session_id = data.get("session_id", "")
+        tool_use_id = data.get("tool_use_id", "")
+        tool_response = data.get("tool_response", {})
+        if not session_id or not tool_use_id:
+            return
+        response_str = json.dumps(tool_response, default=str)[:4000]
+        with sqlite3.connect(self.db_path) as conn:
+            # Find the matching PreToolUse row and compute duration
+            row = conn.execute(
+                "SELECT id, created_at FROM tool_event WHERE tool_use_id = ? LIMIT 1",
+                (tool_use_id,),
+            ).fetchone()
+            if row:
+                try:
+                    start = datetime.fromisoformat(row[1])
+                    dur_ms = int((datetime.now() - start).total_seconds() * 1000)
+                except Exception:
+                    dur_ms = None
+                conn.execute(
+                    "UPDATE tool_event SET tool_response = ?, duration_ms = ? WHERE id = ?",
+                    (response_str, dur_ms, row[0]),
+                )
+                conn.commit()
+        logging.info(f"PostToolUse: {tool_use_id} session={session_id}")
 
     def handle_subagent_start(self, data: dict) -> None:
         agent_id = data.get("agent_id", "")
@@ -536,7 +568,7 @@ def main():
 
     event = sys.argv[1]
     valid = ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
-             "Notification", "PreToolUse", "TeammateIdle", "TaskCompleted"]
+             "Notification", "PreToolUse", "PostToolUse", "TeammateIdle", "TaskCompleted"]
     if event not in valid:
         logging.error(f"Invalid event: {event}")
         sys.exit(1)
@@ -577,6 +609,8 @@ def main():
         tracker.handle_notification(data)
     elif event == "PreToolUse":
         tracker.handle_pre_tool_use(data)
+    elif event == "PostToolUse":
+        tracker.handle_post_tool_use(data)
     elif event == "TeammateIdle":
         tracker.handle_teammate_idle(data)
     elif event == "TaskCompleted":

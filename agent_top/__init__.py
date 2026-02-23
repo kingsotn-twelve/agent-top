@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 PREVIEW_ROWS = 7  # lines reserved for inline preview (divider + header + content)
 
@@ -157,10 +157,14 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        # Migrate: add pid column if not present (existing installs)
+        # Migrate: add columns if not present (existing installs)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(prompt)")}
         if "pid" not in cols:
             conn.execute("ALTER TABLE prompt ADD COLUMN pid INTEGER")
+        te_cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_event)")}
+        for col, ctype in [("tool_input", "TEXT"), ("tool_response", "TEXT"), ("tool_use_id", "TEXT"), ("duration_ms", "INTEGER")]:
+            if col not in te_cols:
+                conn.execute(f"ALTER TABLE tool_event ADD COLUMN {col} {ctype}")
 
         # Active sessions: latest prompt per session, un-stopped only.
         # No time-based heuristics — we check the actual process PID below.
@@ -274,7 +278,7 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
             try:
                 rows = []
                 for row in conn.execute(
-                    """SELECT tool_name, tool_label, created_at FROM tool_event
+                    """SELECT tool_name, tool_label, created_at, tool_input, tool_response, duration_ms FROM tool_event
                        WHERE session_id = ?
                          AND created_at > datetime('now', '-30 minutes')
                        ORDER BY created_at DESC
@@ -1117,10 +1121,39 @@ def _draw_detail(stdscr, pr, col, max_row, max_col, sel_agent, cache, scroll=0):
                 if pr >= max_row_virtual:
                     break
                 ts = fmt_time(ev.get("created_at"))
+                dur_ms = ev.get("duration_ms")
+                dur_str = f" {dur_ms}ms" if dur_ms else ""
                 tool_str = friendly_tool(ev["tool_name"], ev.get("tool_label", ""))
                 P(pr, col, ts, DIM)
-                P(pr, col + 9, tool_str[:pw - 10], YELLOW)
+                P(pr, col + 9, tool_str[:pw - 20], YELLOW)
+                if dur_str:
+                    P(pr, col + 9 + min(len(tool_str), pw - 20) + 1, dur_str, DIM)
                 pr += 1
+                # Show tool_input summary
+                raw_input = ev.get("tool_input")
+                if raw_input and pr < max_row_virtual:
+                    try:
+                        ti = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+                        # Show key fields compactly
+                        parts = []
+                        for k, v in list(ti.items())[:3]:
+                            vs = str(v).replace("\n", " ")[:60]
+                            parts.append(f"{k}={vs}")
+                        input_line = "  " + "  ".join(parts)
+                        P(pr, col, input_line[:pw], DIM)
+                        pr += 1
+                    except Exception:
+                        pass
+                # Show tool_response summary
+                raw_resp = ev.get("tool_response")
+                if raw_resp and pr < max_row_virtual:
+                    try:
+                        tr = json.loads(raw_resp) if isinstance(raw_resp, str) else raw_resp
+                        resp_str = str(tr).replace("\n", " ")[:pw - 4]
+                        P(pr, col, f"  → {resp_str}", GREEN)
+                        pr += 1
+                    except Exception:
+                        pass
 
     elif sel_agent and sel_agent.get("is_teammate"):
         # Task list for selected team member
@@ -2223,7 +2256,8 @@ def setup(no_ccnotify=False):
     "UserPromptSubmit": [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} UserPromptSubmit"}}]}}],
     "Stop":             [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Stop"}}]}}],
     "Notification":     [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} Notification"}}]}}],
-    "PreToolUse":       [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PreToolUse"}}]}}]
+    "PreToolUse":       [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PreToolUse"}}]}}],
+    "PostToolUse":      [{{"matcher": "", "hooks": [{{"type": "command", "command": "{dest} PostToolUse"}}]}}]
   }}
 }}''')
     print()
