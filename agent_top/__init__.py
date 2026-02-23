@@ -291,6 +291,24 @@ def query_db(db_path: str, stats_range_idx: int = 2) -> dict:
             except sqlite3.OperationalError:
                 pass
 
+        # Session prompts: all prompts for active sessions (for interleaved tree view)
+        data["session_prompts"] = {}
+        for sid in active_sids:
+            try:
+                rows = []
+                for row in conn.execute(
+                    """SELECT prompt, created_at FROM prompt
+                       WHERE session_id = ? AND prompt IS NOT NULL AND prompt != ''
+                       ORDER BY created_at DESC
+                       LIMIT 20""",
+                    (sid,),
+                ):
+                    rows.append(dict(row))
+                if rows:
+                    data["session_prompts"][sid] = rows  # newest first
+            except sqlite3.OperationalError:
+                pass
+
         # Activity buckets for sparklines (last 60s, 20 buckets of 3s each)
         for sid in active_sids:
             try:
@@ -738,12 +756,13 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
 
 
 def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
-    """Hierarchical Tree: selected session's agents + tool timeline."""
+    """Interleaved timeline: prompts, tools, and agents in chronological order (newest first)."""
     active_all = cache.get("active_all", [])
     r_agents = cache.get("r_agents", [])
     c_agents = cache.get("c_agents", [])
     session_tools = cache.get("session_tools", {})
     tool_events = cache.get("tool_events", {})
+    session_prompts = cache.get("session_prompts", {})
     rw = x + w  # absolute right edge
 
     # Scope to selected session
@@ -757,43 +776,55 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
         safe_add(stdscr, y, x + 2, "select a session", rw, DIM)
         return
 
-    pr = y
-
-    # Named agents (with non-empty type) for this session
+    # Build unified timeline: collect all events with timestamps
+    timeline = []
+    # Prompts
+    for p in session_prompts.get(target_sid, []):
+        prompt_text = (p.get("prompt") or "").replace("\n", " ").strip()
+        if prompt_text.startswith("<"):
+            continue
+        timeline.append({"ts": p.get("created_at", ""), "kind": "prompt", "text": prompt_text})
+    # Tools
+    for t in (session_tools.get(target_sid, []) or tool_events.get(target_sid, [])):
+        dur_ms = t.get("duration_ms")
+        dur_str = f" {dur_ms}ms" if dur_ms else ""
+        desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
+        timeline.append({"ts": t.get("created_at", ""), "kind": "tool", "text": f"{desc}{dur_str}"})
+    # Agents
     children = [a for a in r_agents if a["session_id"] == target_sid and a.get("agent_type")]
     completed = [a for a in c_agents if a["session_id"] == target_sid and a.get("agent_type")][:5]
-    named_agents = children + completed
-    if named_agents:
-        safe_add(stdscr, pr, x + 2, f"AGENTS  {len(named_agents)}", rw, CYAN)
-        pr += 1
-        for i, a in enumerate(named_agents):
-            if pr >= y + h:
-                break
-            is_last = (i == len(named_agents) - 1)
-            connector = "\u2514\u2500" if is_last else "\u251c\u2500"
-            atype = a["agent_type"]
-            adur = fmt_dur(a["started_at"], a.get("stopped_at"))
-            running = a in children
-            color = MAGENTA if running else DIM
-            safe_add(stdscr, pr, x + 2, f"{connector} {atype}  {adur}", rw, color)
-            pr += 1
+    for a in children + completed:
+        adur = fmt_dur(a["started_at"], a.get("stopped_at"))
+        running = a in children
+        timeline.append({"ts": a.get("started_at", ""), "kind": "agent", "text": f"{a['agent_type']}  {adur}",
+                         "running": running})
+
+    # Sort newest first
+    timeline.sort(key=lambda e: e.get("ts", ""), reverse=True)
+
+    scroll = state.get("detail_scroll", 0)
+    timeline = timeline[scroll:]
+
+    pr = y
+    kind_colors = {"prompt": WHITE, "tool": YELLOW, "agent": MAGENTA}
+    kind_icons = {"prompt": "\u25b8", "tool": "\u2502", "agent": "\u25c6"}
+
+    for ev in timeline:
+        if pr >= y + h:
+            break
+        kind = ev["kind"]
+        icon = kind_icons.get(kind, " ")
+        color = kind_colors.get(kind, DIM)
+        if kind == "agent" and not ev.get("running"):
+            color = DIM
+        ts = fmt_time(ev.get("ts", ""))
+        text = ev["text"][:w - 14]
+        safe_add(stdscr, pr, x + 2, ts, rw, DIM)
+        safe_add(stdscr, pr, x + 11, f"{icon} {text}", rw, color)
         pr += 1
 
-    # Tool timeline (always show)
-    tools = session_tools.get(target_sid, []) or tool_events.get(target_sid, [])
-    if tools:
-        safe_add(stdscr, pr, x + 2, f"TOOLS  {len(tools)}", rw, CYAN)
-        pr += 1
-        for t in tools:
-            if pr >= y + h:
-                break
-            ts = fmt_time(t.get("created_at", ""))
-            desc = friendly_tool(t["tool_name"], t.get("tool_label", ""))
-            safe_add(stdscr, pr, x + 2, ts, rw, DIM)
-            safe_add(stdscr, pr, x + 11, desc[:w - 14], rw, YELLOW)
-            pr += 1
-    elif pr < y + h:
-        safe_add(stdscr, pr, x + 2, "(no tools)", rw, DIM)
+    if not timeline:
+        safe_add(stdscr, y, x + 2, "(no activity)", rw, DIM)
 
 
 def _draw_viz_graph_removed():
@@ -1048,6 +1079,7 @@ def refresh_data(cache: dict, stats_range_idx: int = 2) -> dict:
         "recent": data["recent_prompts"],
         "tool_events": data["tool_events"],
         "session_tools": data["session_tools"],
+        "session_prompts": data["session_prompts"],
         "activity": data["activity"],
         "team_data": team_data,
         "session_lookup": {s["session_id"]: s for s in active_all},
