@@ -974,6 +974,15 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     # Store timeline so Enter can access the highlighted item
     state["_tree_len"] = len(timeline)
     state["_tree_timeline"] = timeline
+
+    # Reposition cursor to anchored prompt after expand/collapse
+    anchor = state.pop("_cursor_anchor", None)
+    if anchor:
+        for i, ev in enumerate(timeline):
+            if ev.get("_prompt_key") == anchor:
+                state["tree_cursor"] = i
+                break
+
     cursor = state.get("tree_cursor", 0)
     if cursor >= len(timeline):
         cursor = max(0, len(timeline) - 1)
