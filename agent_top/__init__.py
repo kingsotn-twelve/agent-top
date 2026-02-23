@@ -2144,7 +2144,7 @@ def main(stdscr, game_of_life=False):
 
     init_colors()
 
-    state: dict = {"selected": -1, "visible_items": [], "status_msg": "", "status_until": 0.0,
+    state: dict = {"selected": 0, "visible_items": [], "status_msg": "", "status_until": 0.0,
                    "stats_range": 2, "game_of_life": game_of_life, "focus": "left", "detail_scroll": 0,
                    "viz_mode": 0}
     cache: dict = {}
