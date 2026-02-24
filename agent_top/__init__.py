@@ -736,18 +736,23 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
     # Collect agents for this session
     now_utc = datetime.now(timezone.utc)
     running_ids = {a["agent_id"] for a in r_agents}
-    all_agents = [a for a in (r_agents + c_agents) if a.get("session_id") == target_sid]
+    all_agents = [a for a in (r_agents + c_agents)
+                  if a.get("session_id") == target_sid and a.get("agent_type")]
     tracks = []
     for a in sorted(all_agents, key=lambda a: a.get("started_at", "")):
         a_start = parse_dt(a.get("started_at"))
         if not a_start:
             continue
         a_end = parse_dt(a.get("stopped_at")) if a.get("stopped_at") else now_utc
+        # Skip ghost agents (< 1s duration, not running)
+        running = a["agent_id"] in running_ids
+        if not running and (a_end - a_start).total_seconds() < 1:
+            continue
         tracks.append({
-            "label": (a.get("agent_type") or "agent"),
+            "label": a["agent_type"],
             "start": a_start,
             "end": a_end,
-            "running": a["agent_id"] in running_ids,
+            "running": running,
         })
 
     # Fallback: if no agents, build tracks from tool events
