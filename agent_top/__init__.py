@@ -1019,14 +1019,9 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
             "_error_message": t.get("error_message", ""),
             "_cwd": t.get("cwd", ""),
         })
-    # Agents
+    # Agents — variable defs only; rendered as agent_groups below
     children = [a for a in r_agents if a["session_id"] == target_sid and a.get("agent_type")]
     completed = [a for a in c_agents if a["session_id"] == target_sid and a.get("agent_type")][:5]
-    for a in children + completed:
-        adur = fmt_dur(a["started_at"], a.get("stopped_at"))
-        running = a in children
-        timeline.append({"ts": a.get("started_at", ""), "kind": "agent", "text": f"{a['agent_type']}  {adur}",
-                         "running": running})
 
     # Match tools to agents
     all_agents = r_agents + c_agents
