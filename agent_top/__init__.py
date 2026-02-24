@@ -2699,6 +2699,14 @@ def main(stdscr, game_of_life=False):
                         else:
                             collapsed.add(pk)
                         state["_expanded_tool"] = -1
+                    elif ev.get("kind") == "agent_group":
+                        aid = ev.get("_agent_id", "")
+                        collapsed_agents = state.setdefault("_collapsed_agents", set())
+                        if aid in collapsed_agents:
+                            collapsed_agents.discard(aid)
+                        else:
+                            collapsed_agents.add(aid)
+                        state["_expanded_tool"] = -1
                     elif ev.get("kind") == "tool":
                         if state.get("_expanded_tool") == tc:
                             state["_expanded_tool"] = -1
