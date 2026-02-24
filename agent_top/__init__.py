@@ -2759,16 +2759,24 @@ def main(stdscr, game_of_life=False):
             stdscr.timeout(RENDER_MS)
         elif ch in (ord("j"), curses.KEY_DOWN):
             if state["focus"] == "right":
-                tc = state.get("tree_cursor", 0)
-                tl = state.get("_tree_len", 0)
-                state["tree_cursor"] = min(tc + 1, max(0, tl - 1))
+                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
+                if viz_m == "gantt":
+                    state["detail_scroll"] = state.get("detail_scroll", 0) + 1
+                else:
+                    tc = state.get("tree_cursor", 0)
+                    tl = state.get("_tree_len", 0)
+                    state["tree_cursor"] = min(tc + 1, max(0, tl - 1))
             else:
                 agents = state["visible_items"]
                 if agents:
                     state["selected"] = min(state["selected"] + 1, len(agents) - 1) if state["selected"] >= 0 else 0
         elif ch in (ord("k"), curses.KEY_UP):
             if state["focus"] == "right":
-                state["tree_cursor"] = max(0, state.get("tree_cursor", 0) - 1)
+                viz_m = VIZ_MODES[state.get("viz_mode", 0) % len(VIZ_MODES)] if state.get("viz_mode", 0) < len(VIZ_MODES) else ""
+                if viz_m == "gantt":
+                    state["detail_scroll"] = max(0, state.get("detail_scroll", 0) - 1)
+                else:
+                    state["tree_cursor"] = max(0, state.get("tree_cursor", 0) - 1)
             elif state["selected"] > 0:
                 state["selected"] -= 1
         elif ch in (ord("l"), curses.KEY_RIGHT):
