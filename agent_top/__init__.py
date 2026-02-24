@@ -808,14 +808,18 @@ def _draw_viz_gantt(stdscr, y, x, h, w, cache, state):
     merged.sort(key=lambda t: t["start"])
     tracks = merged
 
-    # Active window: earliest start → latest end
-    window_start = min(t["start"] for t in tracks)
-    window_end = max(t["end"] for t in tracks)
+    # Active window: earliest start → latest end (bar tracks only, not prompt separators)
+    bar_tracks = [t for t in tracks if "end" in t]
+    if not bar_tracks:
+        safe_add(stdscr, y + 1, x + 2, "(no activity)", rw, DIM)
+        return
+    window_start = min(t["start"] for t in bar_tracks)
+    window_end = max(t["end"] for t in bar_tracks)
     span = max(1.0, (window_end - window_start).total_seconds())
 
     # Active time: agent durations (or burst durations if no agents)
-    agent_time = sum((t["end"] - t["start"]).total_seconds() for t in tracks if not t.get("_is_burst"))
-    active_s = agent_time if agent_time > 0 else sum((t["end"] - t["start"]).total_seconds() for t in tracks)
+    agent_time = sum((t["end"] - t["start"]).total_seconds() for t in bar_tracks if not t.get("_is_burst"))
+    active_s = agent_time if agent_time > 0 else sum((t["end"] - t["start"]).total_seconds() for t in bar_tracks)
 
     # Layout
     label_w = 16
