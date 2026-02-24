@@ -77,11 +77,14 @@ def friendly_tool(name: str, label: str = "") -> str:
     if not base:
         base = name
     if label and label != name:
-        # Shorten paths in labels
-        short_label = label
-        if "/" in short_label:
-            short_label = os.path.basename(short_label)
-        return f"{base}: {short_label}"
+        # For tools whose label is already a human-readable description
+        # (Bash description, Grep description, etc.), use the label directly
+        # instead of prepending the base verb.
+        # Heuristic: if the label doesn't look like a path/command fragment,
+        # it's a description — use it as-is.
+        if "/" in label:
+            return f"{base}: {os.path.basename(label)}"
+        return label
     return base
 # Selection highlight variants (white-on-dark-gray)
 SEL = SEL_DIM = SEL_CYAN = SEL_YELLOW = SEL_GREEN = SEL_MAGENTA = SEL_RED = 0

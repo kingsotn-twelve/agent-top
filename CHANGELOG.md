@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.1 — Feb 23, 2026
+
+### Smarter tool labels
+
+Tool labels now display human-readable descriptions directly (e.g. "Install package dependencies") instead of prepending the verb name. Path-based labels still get shortened to the filename.
+
 ## v0.9.3 — Feb 22, 2026
 
 ### One-command install
