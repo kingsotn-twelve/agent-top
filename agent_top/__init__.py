@@ -1030,18 +1030,34 @@ def _draw_viz_tree(stdscr, y, x, h, w, cache, state):
     all_agents = r_agents + c_agents
     agent_tools, agent_labels, unmatched_tools = _match_tools_to_agents(timeline, all_agents, target_sid)
 
-    # Build agent group events
+    # Build agent group events with disambiguation for duplicate labels
     agent_group_events = []
-    for a in children + completed:
+    all_agent_list = children + completed
+    # Count label occurrences to decide whether to add sequence numbers
+    raw_labels = []
+    for a in all_agent_list:
+        raw_labels.append(agent_labels.get(a["agent_id"], a["agent_type"]))
+    label_counts = {}
+    for lbl in raw_labels:
+        label_counts[lbl] = label_counts.get(lbl, 0) + 1
+    label_seq = {}  # track next sequence number per label
+    for i, a in enumerate(all_agent_list):
         aid = a["agent_id"]
         a_tools = agent_tools.get(aid, [])
         adur = fmt_dur(a["started_at"], a.get("stopped_at"))
         running = a in children
-        label = agent_labels.get(aid, a["agent_type"])
+        label = raw_labels[i]
+        # Add sequence number when label appears more than once
+        if label_counts.get(label, 1) > 1:
+            seq = label_seq.get(label, 1)
+            label_seq[label] = seq + 1
+            display_label = f"{label} #{seq}"
+        else:
+            display_label = label
         agent_group_events.append({
             "ts": a.get("started_at", ""),
             "kind": "agent_group",
-            "text": f"{label}  {adur}",
+            "text": f"{display_label}  {adur}",
             "running": running,
             "_agent_id": aid,
             "_children": a_tools,
